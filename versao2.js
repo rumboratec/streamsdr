@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const WebSocket = require('ws');
 const { spawn } = require('child_process');
 
@@ -12,10 +13,40 @@ const CONFIG = {
 
 let rtlProcess = null;
 let rdsProcess = null;
+let pilotProcess = null;
 let icecastProcess = null;
 let currentFreq = CONFIG.frequency;
 let rdsBuffer = '';
-let squelchLevel = 0; // 0 = desligado, 0.01~0.5 = limiar
+let squelchLevel = 0;
+
+// Qualidade de sinal
+let lastRdsTime = 0;
+let levelHistory = [];
+const LEVEL_HISTORY_SIZE = 20;
+
+function computeSignalQuality(level) {
+    // Adiciona level ao histórico
+    levelHistory.push(level);
+    if (levelHistory.length > LEVEL_HISTORY_SIZE) levelHistory.shift();
+
+    const rdsRecent = (Date.now() - lastRdsTime) < 5000; // RDS nos últimos 5s
+
+    if (rdsRecent) return 5; // RDS presente = sinal excelente
+
+    if (levelHistory.length < 5) return 0;
+
+    // Calcula variância do level (chiado = variância alta, sinal = variância baixa)
+    const mean = levelHistory.reduce((a, b) => a + b, 0) / levelHistory.length;
+    const variance = levelHistory.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / levelHistory.length;
+    const cv = mean > 0.001 ? variance / (mean * mean) : 999; // coeficiente de variação
+
+    if (mean < 0.005) return 0;        // sem sinal
+    if (cv > 0.5)     return 1;        // chiado puro (muito instável)
+    if (cv > 0.3)     return 2;        // sinal fraco
+    if (cv > 0.15)    return 3;        // sinal médio
+    if (cv > 0.05)    return 4;        // sinal bom
+    return 5;                           // sinal excelente
+}
 
 function startIcecast(url) {
     if (icecastProcess) { try { process.kill(-icecastProcess.pid, 'SIGKILL'); } catch(e) {} icecastProcess = null; }
@@ -37,16 +68,19 @@ function broadcastRDS(data) {
 
 class StereoDetector {
     constructor() {
-        this.sampleRate = 44100;
+        this.sampleRate = 171000;  // agora analisa a 171kHz
         this.pilotFreq  = 19000;
         this.w     = 2 * Math.PI * this.pilotFreq / this.sampleRate;
         this.coeff = 2 * Math.cos(this.w);
         this.s1 = 0; this.s2 = 0;
         this.count = 0;
-        this.blockSize = 441;
+        this.blockSize = 1710;     // ~10ms a 171kHz
         this.totalPower = 0;
         this.isStereo = false;
-        this.threshold = 0.003;
+        this.threshold    = 0.00035;  // limiar para entrar em stereo
+        this.thresholdOff = 0.00025;  // limiar para sair de stereo (histerese)
+        this.smoothRatio  = 0;
+        this.alpha        = 0.04;     // suavização mais lenta para estabilizar
     }
 
     process(chunk) {
@@ -63,17 +97,30 @@ class StereoDetector {
                 const power = (this.s1 * this.s1 + this.s2 * this.s2 - this.coeff * this.s1 * this.s2) / (this.blockSize * this.blockSize);
                 const total = this.totalPower / this.blockSize;
                 const ratio = total > 0.00001 ? power / total : 0;
-                const stereo = ratio > this.threshold;
 
-                if (stereo !== this.isStereo) {
-                    this.isStereo = stereo;
-                    wss.clients.forEach((client) => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(JSON.stringify({ type: 'stereo', stereo }));
-                        }
-                    });
-                    console.log('[Stereo]', stereo ? 'STEREO detected' : 'MONO');
+                this.smoothRatio += (ratio - this.smoothRatio) * this.alpha;
+
+                // Só usa o detector de piloto se não houver RDS recente
+                const rdsRecent = (Date.now() - lastRdsTime) < 5000;
+                if (!rdsRecent) {
+                    let stereo = this.isStereo;
+                    if (!this.isStereo && this.smoothRatio > this.threshold)    stereo = true;
+                    if (this.isStereo  && this.smoothRatio < this.thresholdOff) stereo = false;
+
+                    if (stereo !== this.isStereo) {
+                        this.isStereo = stereo;
+                        console.log('[Pilot] stereo:', stereo, '| ratio:', this.smoothRatio.toFixed(6));
+                        wss.clients.forEach((client) => {
+                            if (client.readyState === WebSocket.OPEN) {
+                                client.send(JSON.stringify({ type: 'stereo', stereo }));
+                            }
+                        });
+                    }
+                } else {
+                    this.isStereo = false; // reseta quando RDS assume
                 }
+
+                if (Math.random() < 0.02) console.log('[Pilot ratio]', this.smoothRatio.toFixed(6));
                 this.s1 = 0; this.s2 = 0;
                 this.count = 0;
                 this.totalPower = 0;
@@ -94,6 +141,7 @@ function killProcess(proc) {
 function startRadio(freq) {
     killProcess(rtlProcess); rtlProcess = null;
     killProcess(rdsProcess); rdsProcess = null;
+    killProcess(pilotProcess); pilotProcess = null;
     setTimeout(() => _startRadio(freq), 800);
 }
 
@@ -101,10 +149,12 @@ function _startRadio(freq) {
     currentFreq = freq;
     console.log(`[Radio] Tuning to ${(freq/1000000).toFixed(2)} MHz`);
 
-    const fifo = '/tmp/rds_fifo';
-    const mkfifo = spawn('bash', ['-c', `[ -p ${fifo} ] || mkfifo ${fifo}`]);
+    const fifo       = '/tmp/rds_fifo';
+    const pilotFifo  = '/tmp/pilot_fifo';
+    const mkfifo = spawn('bash', ['-c', `[ -p ${fifo} ] || mkfifo ${fifo}; [ -p ${pilotFifo} ] || mkfifo ${pilotFifo}`]);
     mkfifo.on('close', () => {
-        const cmd = `rtl_fm -f ${freq} -M wfm -s 171k -E deemp -g ${CONFIG.gain} -A std | tee ${fifo} | sox -t raw -r 171000 -e signed -b 16 -c 1 - -t raw -r 44100 -`;
+        // pipeline: rtl_fm → tee rds_fifo → tee pilot_fifo → sox → stdout
+        const cmd = `rtl_fm -f ${freq} -M wfm -s 171k -E deemp -g ${CONFIG.gain} -A std | tee ${fifo} | tee ${pilotFifo} | sox -t raw -r 171000 -e signed -b 16 -c 1 - -t raw -r 44100 -`;
         console.log('[Radio] Command:', cmd);
 
         rdsProcess = spawn('bash', ['-c', `redsea -r 171000 < ${fifo}`], { detached: true });
@@ -117,12 +167,27 @@ function _startRadio(freq) {
                 try {
                     const rds = JSON.parse(l);
                     console.log('[RDS]', JSON.stringify(rds));
+                    lastRdsTime = Date.now();
+                    if (rds.di && rds.di.stereo !== undefined) {
+                        wss.clients.forEach((client) => {
+                            if (client.readyState === WebSocket.OPEN) {
+                                client.send(JSON.stringify({ type: 'stereo', stereo: rds.di.stereo }));
+                            }
+                        });
+                    }
                     broadcastRDS(rds);
                 } catch(e) {}
             });
         });
         rdsProcess.stderr.on('data', (d) => console.log(`[redsea] ${d.toString().trim()}`));
         rdsProcess.on('close', (code) => console.log(`[RDS] exited ${code}`));
+
+        // Processo que lê o sinal a 171kHz para detectar piloto de 19kHz
+        pilotProcess = spawn('bash', ['-c', `cat ${pilotFifo}`], { detached: true });
+        pilotProcess.stdout.on('data', (chunk) => {
+            stereoDetector.process(chunk);
+        });
+        pilotProcess.on('close', (code) => console.log(`[Pilot] exited ${code}`));
 
         setTimeout(() => {
             rtlProcess = spawn('bash', ['-c', cmd], { detached: true });
@@ -132,13 +197,13 @@ function _startRadio(freq) {
                 for (let i = 0; i < int16.length; i++) sum += Math.abs(int16[i]);
                 const level = sum / int16.length / 32768.0;
 
+                const quality = computeSignalQuality(level);
+
                 wss.clients.forEach((client) => {
                     if (client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({ type: 'level', audio: level }));
+                        client.send(JSON.stringify({ type: 'level', audio: level, quality }));
                     }
                 });
-
-                stereoDetector.process(chunk);
 
                 // Squelch: só transmite se nível acima do limiar
                 if (squelchLevel === 0 || level >= squelchLevel) {
@@ -183,16 +248,134 @@ function sendStatus(ws) {
     ws.send(JSON.stringify({ type: 'status', freq: currentFreq, sampleRate: CONFIG.sampleRate }));
 }
 
-wss.on('connection', (ws) => {
-    console.log('[Web] Client connected');
+// Memórias compartilhadas (banco simples em memória, persistido em JSON)
+const fs = require('fs');
+const MEMORIES_FILE = './memories.json';
+let sharedMemories = [null, null, null, null];
+try {
+    if (fs.existsSync(MEMORIES_FILE)) {
+        sharedMemories = JSON.parse(fs.readFileSync(MEMORIES_FILE, 'utf8'));
+    }
+} catch(e) {}
+
+function saveMemoriesToDisk() {
+    try { fs.writeFileSync(MEMORIES_FILE, JSON.stringify(sharedMemories)); } catch(e) {}
+}
+
+function broadcastMemories() {
+    wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: 'memories', memories: sharedMemories }));
+        }
+    });
+}
+
+function broadcastUserCount() {
+    const count = wss.clients.size;
+    wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: 'users', count }));
+        }
+    });
+}
+
+let ngrokUrl = null;
+
+// ===== RASTREAMENTO DE USUÁRIOS =====
+const onlineUsers = new Map();
+
+function getGeoIp(ip) {
+    return new Promise((resolve) => {
+        const cleanIp = ip.replace('::ffff:', '');
+        console.log('[GeoIP] consultando:', cleanIp);
+        // IPs privados e locais
+        if (cleanIp === '127.0.0.1' || cleanIp === '::1' ||
+            cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.') ||
+            cleanIp.startsWith('172.16.') || cleanIp.startsWith('172.17.') ||
+            cleanIp.startsWith('172.18.') || cleanIp.startsWith('172.19.') ||
+            cleanIp.startsWith('172.2') || cleanIp.startsWith('172.30.') ||
+            cleanIp.startsWith('172.31.')) {
+            resolve({ city: 'Rede Local', region: '', country: cleanIp });
+            return;
+        }
+        const req = http.get('http://ip-api.com/json/' + cleanIp + '?fields=city,regionName,country,status', (res) => {
+            let data = '';
+            res.on('data', d => data += d);
+            res.on('end', () => {
+                console.log('[GeoIP] resposta:', data.substring(0, 120));
+                try {
+                    const json = JSON.parse(data);
+                    if (json.status === 'success') {
+                        resolve({ city: json.city, region: json.regionName, country: json.country });
+                    } else {
+                        resolve({ city: '?', region: '?', country: '?' });
+                    }
+                } catch(e) { resolve({ city: '?', region: '?', country: '?' }); }
+            });
+        });
+        req.on('error', (e) => { console.log('[GeoIP] erro:', e.message); resolve({ city: '?', region: '?', country: '?' }); });
+        req.setTimeout(4000, () => { req.destroy(); resolve({ city: '?', region: '?', country: '?' }); });
+    });
+}
+
+function sendNtfy(title, message) {
+    const body = message;
+    const options = {
+        hostname: 'ntfy.sh',
+        path: '/radiorumbora',
+        method: 'POST',
+        headers: {
+            'Content-Type': 'text/plain',
+            'Title': title,
+            'Priority': 'default',
+            'Tags': 'radio'
+        }
+    };
+
+    const req = https.request(options, (res) => {
+        console.log('[ntfy] status:', res.statusCode);
+    });
+    req.on('error', (e) => console.log('[ntfy] error:', e.message));
+    req.setTimeout(6000, () => req.destroy());
+    req.write(body);
+    req.end();
+}
+
+wss.on('connection', (ws, req) => {
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+    const connectedAt = new Date().toLocaleString('pt-BR', { timeZone: 'America/Fortaleza' });
+    console.log('[Web] Client connected:', ip);
+
+    // Registra usuário e busca geo
+    onlineUsers.set(ws, { ip, city: '...', region: '', country: '', freq: null, action: '', connectedAt });
+    getGeoIp(ip).then(geo => {
+        const u = onlineUsers.get(ws);
+        if (u) {
+            u.city = geo.city; u.region = geo.region; u.country = geo.country;
+            const loc = [geo.city, geo.region, geo.country].filter(Boolean).join(', ');
+            sendNtfy('Conectou', ip + ' | ' + loc + ' | ' + connectedAt);
+        }
+    });
+
     sendStatus(ws);
+    ws.send(JSON.stringify({ type: 'memories', memories: sharedMemories }));
+    if (ngrokUrl) ws.send(JSON.stringify({ type: 'ngrok_url', url: ngrokUrl }));
+    broadcastUserCount();
 
     ws.on('message', (message) => {
         try {
             const cmd = JSON.parse(message);
             if (cmd.type === 'tune') {
                 const freqHz = Math.floor(parseFloat(cmd.freq) * 1000000);
+                const freqMHz = parseFloat(cmd.freq);
                 currentFreq = freqHz;
+                // Atualiza freq do usuário
+                const u = onlineUsers.get(ws);
+                if (u) {
+                    u.freq = freqMHz; u.action = 'sintonizou';
+                    const loc = [u.city, u.region, u.country].filter(Boolean).join(', ');
+                    sendNtfy('Sintonizou', ip + ' | ' + loc + ' | ' + freqMHz.toFixed(2) + ' MHz');
+                }
                 wss.clients.forEach(c => {
                     if (c.readyState === WebSocket.OPEN) {
                         sendStatus(c);
@@ -202,15 +385,39 @@ wss.on('connection', (ws) => {
                 });
                 startRadio(freqHz);
             }
+            if (cmd.type === 'save_memory') {
+                const idx = parseInt(cmd.index);
+                const freq = parseFloat(cmd.freq);
+                if (idx >= 0 && idx <= 3 && freq) {
+                    sharedMemories[idx] = freq;
+                    saveMemoriesToDisk();
+                    broadcastMemories();
+                    console.log('[Memory] Slot', idx, 'saved:', freq);
+                    // Notifica salvamento
+                    const u = onlineUsers.get(ws);
+                    if (u) {
+                        const loc = [u.city, u.region, u.country].filter(Boolean).join(', ');
+                        sendNtfy('Salvou M' + (idx+1), ip + ' | ' + loc + ' | ' + freq.toFixed(2) + ' MHz');
+                    }
+                }
+            }
             if (cmd.type === 'icecast') {
                 startIcecast(cmd.url || null);
                 ws.send(JSON.stringify({ type: 'icecast_status', active: !!cmd.url }));
             }
-            if (cmd.type === 'squelch') {
-                squelchLevel = parseFloat(cmd.level) || 0;
-                console.log('[Squelch] level:', squelchLevel);
-            }
         } catch(e) { console.error(e); }
+    });
+
+    ws.on('close', () => {
+        const u = onlineUsers.get(ws);
+        if (u) {
+            const loc = [u.city, u.region, u.country].filter(Boolean).join(', ');
+            const freq = u.freq ? ' | ' + u.freq.toFixed(2) + ' MHz' : '';
+            sendNtfy('Desconectou', ip + ' | ' + loc + freq);
+        }
+        onlineUsers.delete(ws);
+        broadcastUserCount();
+        console.log('[Web] Client disconnected:', ip);
     });
 });
 
@@ -317,6 +524,27 @@ const htmlContent = `
             box-shadow: 0 0 8px rgba(0,230,118,0.4);
         }
 
+        .signal-bars {
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            height: 16px;
+        }
+        .signal-bars .bar {
+            width: 5px;
+            border-radius: 1px;
+            background: #1e2530;
+            transition: background 0.3s, height 0.3s;
+        }
+        .signal-bars .bar:nth-child(1) { height: 4px; }
+        .signal-bars .bar:nth-child(2) { height: 6px; }
+        .signal-bars .bar:nth-child(3) { height: 9px; }
+        .signal-bars .bar:nth-child(4) { height: 12px; }
+        .signal-bars .bar:nth-child(5) { height: 16px; }
+        .signal-bars .bar.lit-good  { background: var(--green); box-shadow: 0 0 4px rgba(0,230,118,0.5); }
+        .signal-bars .bar.lit-warn  { background: #ffea00;      box-shadow: 0 0 4px rgba(255,234,0,0.4); }
+        .signal-bars .bar.lit-bad   { background: #ff1744;      box-shadow: 0 0 4px rgba(255,23,68,0.4); }
+
         .freq-display {
             font-family: 'Orbitron', monospace;
             font-size: 2.8rem;
@@ -375,16 +603,36 @@ const htmlContent = `
             background: rgba(0,230,118,0.05);
             box-shadow: 0 0 15px rgba(0,230,118,0.08);
         }
-
-        .btn-mute {
+        .btn-listen.muted {
             border-color: #ff8a65;
             color: #ff8a65;
-            padding: 12px 14px;
-            font-size: 0.75rem;
+            background: rgba(255,138,101,0.08);
+            box-shadow: 0 0 10px rgba(255,138,101,0.15);
         }
-        .btn-mute.muted {
-            background: rgba(255,138,101,0.15);
-            box-shadow: 0 0 10px rgba(255,138,101,0.2);
+
+        .btn-arrow {
+            border-color: var(--teal);
+            color: var(--teal);
+            padding: 10px 14px;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+            min-width: 42px;
+        }
+        .btn-arrow:hover {
+            background: rgba(0,188,212,0.15);
+            box-shadow: 0 0 10px rgba(0,188,212,0.2);
+        }
+        .btn-arrow svg {
+            width: 14px;
+            height: 14px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2.2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
         }
 
         .vu-wrap {
@@ -429,6 +677,31 @@ const htmlContent = `
         .rds-tag { color: #3a5060; letter-spacing: 0.1em; font-size: 0.65rem; min-width: 28px; }
         .rds-val { color: #00e676; font-family: 'Share Tech Mono', monospace; letter-spacing: 0.05em; }
         .rds-rt { color: #7a8ea0; font-size: 0.7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+
+        .ngrok-wrap {
+            background: #0d0f12;
+            border: 1px solid #1a2030;
+            border-radius: 6px;
+            padding: 12px 16px;
+            margin-top: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .ngrok-label { font-size: 0.6rem; letter-spacing: 0.2em; color: #3a4555; text-transform: uppercase; }
+        .ngrok-row { display: flex; align-items: center; gap: 8px; }
+        .ngrok-url {
+            flex: 1;
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 0.72rem;
+            color: var(--teal);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            opacity: 0.7;
+        }
+        .ngrok-url.active { opacity: 1; color: var(--green); }
+        .btn-ngrok { border-color: var(--teal); color: var(--teal); font-size: 0.65rem; padding: 6px 10px; }
 
         .icecast-wrap {
             background: #0d0f12;
@@ -506,105 +779,96 @@ const htmlContent = `
 
         .mem-btn:hover { border-color: var(--teal); }
         .mem-btn.active { border-color: var(--teal); background: rgba(0,188,212,0.05); }
+        .mem-btn.saving { border-color: #ff8a65; background: rgba(255,138,101,0.08); }
 
         .mem-freq {
             font-family: 'Orbitron', sans-serif;
-            font-size: 0.7rem;
+            font-size: 0.75rem;
             color: var(--teal);
             letter-spacing: 0.02em;
+            margin: 4px 0;
         }
 
         .mem-freq.empty { color: #2a3545; }
 
-        .mem-slot {
-            font-size: 0.55rem;
-            color: #3a5060;
-            margin-bottom: 2px;
+        .mem-progress {
+            width: 100%;
+            height: 2px;
+            background: transparent;
+            border-radius: 1px;
+            margin-top: 4px;
+            overflow: hidden;
+        }
+        .mem-progress-bar {
+            height: 100%;
+            width: 0%;
+            background: #ff8a65;
+            border-radius: 1px;
+            transition: width linear;
         }
 
-        .mem-save {
-            font-size: 0.5rem;
-            color: #3a5060;
-            margin-top: 4px;
-            cursor: pointer;
+        .mem-hint {
+            font-size: 0.55rem;
+            color: #2a3545;
+            text-align: center;
+            margin-top: 8px;
             letter-spacing: 0.05em;
         }
 
-        .mem-save:hover { color: #ff8a65; }
-
-        .squelch-wrap {
-            background: #0d0f12;
-            border: 1px solid #1a2030;
-            border-radius: 6px;
-            padding: 12px 16px;
-            margin-top: 12px;
-        }
-
-        .squelch-row {
+        .users-count {
             display: flex;
             align-items: center;
-            gap: 10px;
-        }
-
-        .squelch-label {
-            font-size: 0.6rem;
-            letter-spacing: 0.15em;
-            color: #3a5060;
-            text-transform: uppercase;
-            min-width: 56px;
-        }
-
-        .squelch-val {
+            gap: 4px;
             font-family: 'Orbitron', sans-serif;
-            font-size: 0.75rem;
-            color: var(--teal);
-            min-width: 36px;
-            text-align: right;
+            font-size: 0.65rem;
+            color: #3a5060;
+            letter-spacing: 0.05em;
         }
-
-        input[type=range] {
-            flex: 1;
-            -webkit-appearance: none;
-            height: 4px;
-            border-radius: 2px;
-            background: #1a2030;
-            outline: none;
-        }
-
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: var(--teal);
-            cursor: pointer;
-        }
-
-        input[type=range].active::-webkit-slider-thumb {
-            background: #ff8a65;
-        }
+        .users-count svg { color: #3a5060; }
+        .users-count.active { color: var(--teal); }
+        .users-count.active svg { color: var(--teal); }
     </style>
 </head>
 <body>
     <div class="panel">
         <div class="header">
             <div class="title">FM MONITOR</div>
-            <div class="status-dot" id="statusDot"></div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <div class="users-count" id="usersCount">
+                    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="7" cy="5" r="3"/><path d="M2 13c0-3 2-5 5-5s5 2 5 5"/></svg>
+                    <span id="usersNum">1</span>
+                </div>
+                <div class="status-dot" id="statusDot"></div>
+            </div>
         </div>
 
         <div class="freq-row">
-            <span class="stereo-badge" id="stereoBadge">STEREO</span>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span class="stereo-badge" id="stereoBadge">STEREO</span>
+                <div class="signal-bars" id="signalBars">
+                    <div class="bar" id="bar1"></div>
+                    <div class="bar" id="bar2"></div>
+                    <div class="bar" id="bar3"></div>
+                    <div class="bar" id="bar4"></div>
+                    <div class="bar" id="bar5"></div>
+                </div>
+            </div>
             <div class="freq-display"><span id="freqDisplay">---.---</span><span class="freq-unit">MHz</span></div>
         </div>
 
         <div class="controls">
-            <input type="number" id="freqInput" step="0.025" placeholder="MHz">
+            <input type="number" id="freqInput" step="0.025" min="76.1" max="108" placeholder="MHz">
+            <button class="btn btn-arrow" onclick="stepFreq(-0.1)" title="Descer 0.1 MHz">
+                <svg viewBox="0 0 14 14"><polyline points="2,10 7,4 12,10"/></svg>
+            </button>
+            <button class="btn btn-arrow" onclick="stepFreq(0.1)" title="Subir 0.1 MHz">
+                <svg viewBox="0 0 14 14"><polyline points="2,4 7,10 12,4"/></svg>
+            </button>
             <button class="btn" onclick="tune()">TUNE</button>
         </div>
 
         <div class="audio-row">
             <button id="playBtn" class="btn btn-listen">&#9654; START AUDIO</button>
-            <button id="muteBtn" class="btn btn-mute" onclick="toggleMute()">&#128264; MUTE</button>
         </div>
 
         <div class="vu-wrap">
@@ -632,45 +896,42 @@ const htmlContent = `
             </div>
         </div>
 
-        <div class="icecast-wrap">
-            <div class="icecast-label">Icecast Stream</div>
-            <div class="icecast-row">
-                <input type="text" id="icecastUrl" placeholder="icecast://source:pass@host:8000/stream">
-                <button class="btn btn-ice" id="icecastBtn" onclick="toggleIcecast()">STREAM</button>
-            </div>
-        </div>
-
         <div class="mem-wrap">
             <div class="mem-label">MEMÓRIAS</div>
             <div class="mem-grid">
-                <div class="mem-btn" id="mem0" onclick="recallMem(0)">
-                    <span class="mem-slot">M1</span>
+                <div class="mem-btn" id="mem0">
                     <span class="mem-freq empty" id="memFreq0">---</span>
-                    <span class="mem-save" onclick="event.stopPropagation();saveMem(0)">SALVAR</span>
+                    <div class="mem-progress" id="memProg0"></div>
                 </div>
-                <div class="mem-btn" id="mem1" onclick="recallMem(1)">
-                    <span class="mem-slot">M2</span>
+                <div class="mem-btn" id="mem1">
                     <span class="mem-freq empty" id="memFreq1">---</span>
-                    <span class="mem-save" onclick="event.stopPropagation();saveMem(1)">SALVAR</span>
+                    <div class="mem-progress" id="memProg1"></div>
                 </div>
-                <div class="mem-btn" id="mem2" onclick="recallMem(2)">
-                    <span class="mem-slot">M3</span>
+                <div class="mem-btn" id="mem2">
                     <span class="mem-freq empty" id="memFreq2">---</span>
-                    <span class="mem-save" onclick="event.stopPropagation();saveMem(2)">SALVAR</span>
+                    <div class="mem-progress" id="memProg2"></div>
                 </div>
-                <div class="mem-btn" id="mem3" onclick="recallMem(3)">
-                    <span class="mem-slot">M4</span>
+                <div class="mem-btn" id="mem3">
                     <span class="mem-freq empty" id="memFreq3">---</span>
-                    <span class="mem-save" onclick="event.stopPropagation();saveMem(3)">SALVAR</span>
+                    <div class="mem-progress" id="memProg3"></div>
                 </div>
+            </div>
+            <div class="mem-hint">Toque para sintonizar &nbsp;·&nbsp; Segure 3s para salvar</div>
+        </div>
+
+        <div class="ngrok-wrap">
+            <div class="ngrok-label">NGROK URL</div>
+            <div class="ngrok-row">
+                <span class="ngrok-url" id="ngrokUrl">aguardando...</span>
+                <button class="btn btn-ngrok" onclick="copyNgrok()">COPIAR</button>
             </div>
         </div>
 
-        <div class="squelch-wrap">
-            <div class="squelch-row">
-                <span class="squelch-label">SQUELCH</span>
-                <input type="range" id="squelchSlider" min="0" max="100" value="0" oninput="updateSquelch(this.value)">
-                <span class="squelch-val" id="squelchVal">OFF</span>
+        <div class="icecast-wrap">
+            <div class="icecast-label">STREAM</div>
+            <div class="icecast-row">
+                <input type="text" id="icecastUrl" placeholder="icecast://source:pass@host:8000/stream">
+                <button class="btn btn-ice" id="icecastBtn" onclick="toggleIcecast()">STREAM</button>
             </div>
         </div>
 
@@ -683,14 +944,15 @@ const htmlContent = `
 
     <script>
         let ws, audioCtx, gainNode, nextStartTime = 0;
-        let muted = false, icecastActive = false;
+        let audioStarted = false, muted = false, icecastActive = false;
         let currentLevel = 0;
+        let lowQualityCount = 0;
+        const AUTO_MUTE_THRESHOLD = 15; // ~15 chunks consecutivos de chiado antes de mutar
 
         const els = {
             freq:      document.getElementById('freqDisplay'),
             input:     document.getElementById('freqInput'),
             playBtn:   document.getElementById('playBtn'),
-            muteBtn:   document.getElementById('muteBtn'),
             statusDot: document.getElementById('statusDot'),
             dbVal:     document.getElementById('dbVal'),
             rdsPs:     document.getElementById('rdsPs'),
@@ -780,13 +1042,21 @@ const htmlContent = `
         }
 
         function updateNeedle() {
-            const db = currentLevel > 0.001 ? 20 * Math.log10(currentLevel) : MIN_DB;
-            targetAngle = dbToAngle(Math.max(MIN_DB, Math.min(MAX_DB, db)));
-            needleAngle += (targetAngle - needleAngle) * (targetAngle > needleAngle ? 0.35 : 0.06);
-            if (needleAngle > peakAngle) { peakAngle = needleAngle; peakHold = 120; }
-            else { peakHold--; if (peakHold <= 0) peakAngle += (MIN_ANGLE - peakAngle) * 0.03; }
-            drawVU();
-            els.dbVal.textContent = currentLevel > 0.001 ? db.toFixed(1) + ' dB' : '-\u221e dB';
+            if (muted || !audioStarted) {
+                needleAngle += (MIN_ANGLE - needleAngle) * 0.06;
+                peakAngle += (MIN_ANGLE - peakAngle) * 0.04;
+                peakHold = 0;
+                drawVU();
+                els.dbVal.textContent = '-\u221e dB';
+            } else {
+                const db = currentLevel > 0.001 ? 20 * Math.log10(currentLevel) : MIN_DB;
+                targetAngle = dbToAngle(Math.max(MIN_DB, Math.min(MAX_DB, db)));
+                needleAngle += (targetAngle - needleAngle) * (targetAngle > needleAngle ? 0.35 : 0.06);
+                if (needleAngle > peakAngle) { peakAngle = needleAngle; peakHold = 120; }
+                else { peakHold--; if (peakHold <= 0) peakAngle += (MIN_ANGLE - peakAngle) * 0.03; }
+                drawVU();
+                els.dbVal.textContent = currentLevel > 0.001 ? db.toFixed(1) + ' dB' : '-\u221e dB';
+            }
             requestAnimationFrame(updateNeedle);
         }
         updateNeedle();
@@ -805,7 +1075,23 @@ const htmlContent = `
                         els.freq.innerText = (msg.freq / 1000000).toFixed(3);
                         els.input.value = (msg.freq / 1000000).toFixed(3);
                     }
-                    if (msg.type === 'level') currentLevel = msg.audio;
+                    if (msg.type === 'level') {
+                        currentLevel = msg.audio;
+                        if (msg.quality !== undefined) {
+                            updateSignalBars(msg.quality);
+                            // Auto-mute se chiado constante
+                            if (audioStarted && !muted) {
+                                if (msg.quality <= 1) {
+                                    lowQualityCount++;
+                                    if (lowQualityCount >= AUTO_MUTE_THRESHOLD) {
+                                        autoMute();
+                                    }
+                                } else {
+                                    lowQualityCount = 0;
+                                }
+                            }
+                        }
+                    }
                     if (msg.type === 'stereo') {
                         document.getElementById('stereoBadge').classList.toggle('on', msg.stereo);
                     }
@@ -816,14 +1102,24 @@ const htmlContent = `
                         if (d.radiotext) els.rdsRt.textContent = d.radiotext;
                         if (d.prog_type) els.rdsPty.textContent = d.prog_type;
                         if (d.tp !== undefined) els.rdsTp.textContent = d.tp ? 'YES' : 'NO';
-                        if (d.di && d.di.stereo !== undefined) {
-                            document.getElementById('stereoBadge').classList.toggle('on', d.di.stereo);
-                        }
                     }
                     if (msg.type === 'rds_clear') {
                         els.rdsPs.textContent = els.rdsPi.textContent = els.rdsRt.textContent =
                         els.rdsPty.textContent = els.rdsTp.textContent = '---';
                         document.getElementById('stereoBadge').classList.remove('on');
+                    }
+                    if (msg.type === 'ngrok_url') {
+                        const el = document.getElementById('ngrokUrl');
+                        el.textContent = msg.url;
+                        el.classList.add('active');
+                    }
+                    if (msg.type === 'memories') {
+                        updateMemories(msg.memories);
+                    }
+                    if (msg.type === 'users') {
+                        const n = msg.count;
+                        document.getElementById('usersNum').textContent = n;
+                        document.getElementById('usersCount').classList.toggle('active', n > 1);
                     }
                     if (msg.type === 'icecast_status') {
                         const btn = document.getElementById('icecastBtn');
@@ -837,7 +1133,7 @@ const htmlContent = `
         }
 
         function playAudio(arrayBuffer) {
-            if (!audioCtx) return;
+            if (!audioCtx || !audioStarted) return;
             const int16 = new Int16Array(arrayBuffer);
             const float32 = new Float32Array(int16.length);
             for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
@@ -858,34 +1154,111 @@ const htmlContent = `
         }
 
         els.playBtn.addEventListener('click', () => {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-            els.playBtn.innerHTML = '&#9646;&#9646; LISTENING...';
-            els.playBtn.classList.add('active');
+            if (!audioStarted) {
+                // Primeira vez: inicia o áudio
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                if (!gainNode) {
+                    gainNode = audioCtx.createGain();
+                    gainNode.gain.value = 1;
+                    gainNode.connect(audioCtx.destination);
+                }
+                audioStarted = true;
+                muted = false;
+                els.playBtn.innerHTML = '&#9646;&#9646; MUTE';
+                els.playBtn.classList.add('active');
+                els.playBtn.classList.remove('muted');
+            } else {
+                // Já iniciado: toggle mute
+                muted = !muted;
+                if (gainNode) gainNode.gain.value = muted ? 0 : 1;
+                if (muted) {
+                    els.playBtn.innerHTML = '&#128263; MUTED';
+                    els.playBtn.classList.add('muted');
+                    els.playBtn.classList.remove('active');
+                } else {
+                    els.playBtn.innerHTML = '&#9646;&#9646; MUTE';
+                    els.playBtn.classList.remove('muted');
+                    els.playBtn.classList.add('active');
+                }
+            }
         });
 
-        window.toggleMute = () => {
-            muted = !muted;
-            if (gainNode) gainNode.gain.value = muted ? 0 : 1;
-            els.muteBtn.classList.toggle('muted', muted);
-            els.muteBtn.innerHTML = muted ? '&#128263; MUTED' : '&#128264; MUTE';
+        window.toggleMute = () => {};  // não usado mais
+
+        window.stepFreq = (delta) => {
+            const MIN_FREQ = 76.1, MAX_FREQ = 108.0;
+            const current = parseFloat(els.input.value) || parseFloat(els.freq.innerText) || 101.7;
+            let next = Math.round((current + delta) * 1000) / 1000;
+            if (next < MIN_FREQ) next = MIN_FREQ;
+            if (next > MAX_FREQ) next = MAX_FREQ;
+            els.input.value = next.toFixed(3);
         };
 
         window.tune = () => {
-            const freq = parseFloat(els.input.value);
-            if (freq && ws) ws.send(JSON.stringify({ type: 'tune', freq }));
+            let freq = parseFloat(els.input.value);
+            if (!freq) return;
+            if (freq < 76.1 || freq > 108) {
+                freq = freq < 76.1 ? 76.1 : 108;
+                els.input.value = freq.toFixed(3);
+                showFreqAlert();
+            }
+            if (ws) ws.send(JSON.stringify({ type: 'tune', freq }));
         };
 
+        function autoMute() {
+            lowQualityCount = 0;
+            muted = true;
+            if (gainNode) gainNode.gain.value = 0;
+            els.playBtn.innerHTML = '&#128263; MUTED';
+            els.playBtn.classList.add('muted');
+            els.playBtn.classList.remove('active');
+            showAlert('CHIADO DETECTADO — ÁUDIO MUTADO', '#ff8a65');
+        }
+
+        function updateSignalBars(quality) {
+            for (let i = 1; i <= 5; i++) {
+                const bar = document.getElementById('bar' + i);
+                bar.classList.remove('lit-good', 'lit-warn', 'lit-bad');
+                if (i <= quality) {
+                    if (quality <= 1)      bar.classList.add('lit-bad');
+                    else if (quality <= 3) bar.classList.add('lit-warn');
+                    else                   bar.classList.add('lit-good');
+                }
+            }
+        }
+
+        function showAlert(message, color) {
+            color = color || '#ff8a65';
+            let alert = document.getElementById('freqAlert');
+            if (!alert) {
+                alert = document.createElement('div');
+                alert.id = 'freqAlert';
+                document.body.appendChild(alert);
+            }
+            alert.style.cssText = 'position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#1a0a00;border:1px solid ' + color + ';color:' + color + ';font-family:Orbitron,sans-serif;font-size:0.7rem;letter-spacing:0.15em;padding:10px 22px;border-radius:4px;box-shadow:0 0 18px rgba(255,138,101,0.25);z-index:9999;pointer-events:none;transition:opacity 0.4s;';
+            alert.textContent = message;
+            alert.style.opacity = '1';
+            clearTimeout(alert._t);
+            alert._t = setTimeout(() => { alert.style.opacity = '0'; }, 2500);
+        }
+
+        function showFreqAlert() {
+            showAlert('FAIXA FM: 76.1 – 108.0 MHz');
+        }
+
         // ===== MEMÓRIAS =====
-        const memories = JSON.parse(localStorage.getItem('fmMemories') || '[null,null,null,null]');
+        // ===== MEMÓRIAS COMPARTILHADAS =====
+        let sharedMems = [null, null, null, null];
         let activeMem = -1;
 
-        function renderMemories() {
-            memories.forEach((freq, i) => {
+        function updateMemories(mems) {
+            sharedMems = mems;
+            mems.forEach((freq, i) => {
                 const el = document.getElementById('memFreq' + i);
                 const btn = document.getElementById('mem' + i);
                 if (freq) {
-                    el.textContent = freq.toFixed(3);
+                    el.textContent = parseFloat(freq).toFixed(2);
                     el.classList.remove('empty');
                 } else {
                     el.textContent = '---';
@@ -894,38 +1267,72 @@ const htmlContent = `
                 btn.classList.toggle('active', i === activeMem);
             });
         }
-        renderMemories();
 
-        window.saveMem = (i) => {
-            const freq = parseFloat(els.input.value || els.freq.innerText);
-            if (!freq) return;
-            memories[i] = freq;
-            localStorage.setItem('fmMemories', JSON.stringify(memories));
-            renderMemories();
-        };
+        const HOLD_TIME = 3000;
+        let holdTimers = [null, null, null, null];
 
-        window.recallMem = (i) => {
-            if (!memories[i]) return;
-            activeMem = i;
-            els.input.value = memories[i].toFixed(3);
-            renderMemories();
-            if (ws) ws.send(JSON.stringify({ type: 'tune', freq: memories[i] }));
-        };
+        for (let i = 0; i < 4; i++) {
+            const btn = document.getElementById('mem' + i);
+            const prog = document.getElementById('memProg' + i);
 
-        window.updateSquelch = (val) => {
-            const level = parseInt(val);
-            const squelchVal = document.getElementById('squelchVal');
-            const slider = document.getElementById('squelchSlider');
-            if (level === 0) {
-                squelchVal.textContent = 'OFF';
-                slider.classList.remove('active');
-            } else {
-                squelchVal.textContent = level + '%';
-                slider.classList.add('active');
-            }
-            // Converte 0-100 para 0-0.3 (faixa útil de nível)
-            const squelchLevel = level === 0 ? 0 : level / 100 * 0.15;
-            if (ws) ws.send(JSON.stringify({ type: 'squelch', level: squelchLevel }));
+            const startHold = (e) => {
+                e.preventDefault();
+                prog.innerHTML = '<div class="mem-progress-bar" id="memBar' + i + '"></div>';
+                const bar = document.getElementById('memBar' + i);
+                bar.style.transition = 'width ' + HOLD_TIME + 'ms linear';
+                btn.classList.add('saving');
+                setTimeout(() => { bar.style.width = '100%'; }, 10);
+
+                holdTimers[i] = setTimeout(() => {
+                    const freq = parseFloat(els.input.value) || parseFloat(els.freq.innerText);
+                    if (freq && ws) {
+                        ws.send(JSON.stringify({ type: 'save_memory', index: i, freq }));
+                        showAlert('SALVO EM M' + (i+1) + ': ' + freq.toFixed(2) + ' MHz', '#00e676');
+                    }
+                    cancelHold(i);
+                }, HOLD_TIME);
+            };
+
+            const cancelHold = (idx) => {
+                clearTimeout(holdTimers[idx]);
+                holdTimers[idx] = null;
+                const b = document.getElementById('mem' + idx);
+                const p = document.getElementById('memProg' + idx);
+                b.classList.remove('saving');
+                p.innerHTML = '';
+            };
+
+            const endHold = (e) => {
+                if (holdTimers[i] !== null) {
+                    cancelHold(i);
+                    if (sharedMems[i]) {
+                        activeMem = i;
+                        els.input.value = parseFloat(sharedMems[i]).toFixed(3);
+                        updateMemories(sharedMems);
+                        if (ws) ws.send(JSON.stringify({ type: 'tune', freq: sharedMems[i] }));
+                    }
+                }
+            };
+
+            btn.addEventListener('mousedown',   startHold);
+            btn.addEventListener('touchstart',  startHold, { passive: false });
+            btn.addEventListener('mouseup',     endHold);
+            btn.addEventListener('mouseleave',  () => { if (holdTimers[i] !== null) cancelHold(i); });
+            btn.addEventListener('touchend',    endHold);
+            btn.addEventListener('touchcancel', () => cancelHold(i));
+        }
+
+        window.saveMem   = () => {};
+        window.recallMem = () => {};
+
+        window.copyNgrok = () => {
+            const url = document.getElementById('ngrokUrl').textContent;
+            if (!url || url === 'aguardando...') return;
+            navigator.clipboard.writeText(url).then(() => {
+                showAlert('URL COPIADA!', '#00e676');
+            }).catch(() => {
+                showAlert('ERRO AO COPIAR', '#ff8a65');
+            });
         };
 
         window.toggleIcecast = () => {
@@ -944,12 +1351,44 @@ const htmlContent = `
 server.listen(CONFIG.webPort, () => {
     console.log(`Server running at http://localhost:${CONFIG.webPort}`);
     startRadio(CONFIG.frequency);
+
+    // Aguarda ngrok iniciar e envia URL via ntfy
+    setTimeout(() => {
+        http.get('http://localhost:4040/api/tunnels', (res) => {
+            let data = '';
+            res.on('data', d => data += d);
+            res.on('end', () => {
+                try {
+                    const json = JSON.parse(data);
+                    const tunnel = json.tunnels.find(t => t.proto === 'https');
+                    if (tunnel) {
+                        ngrokUrl = url;
+                        console.log('[ngrok] URL publica:', url);
+                        sendNtfy('FM Monitor Online', 'Acesse: ' + url);
+                        // Envia URL para todos os clientes conectados
+                        wss.clients.forEach(c => {
+                            if (c.readyState === WebSocket.OPEN) {
+                                c.send(JSON.stringify({ type: 'ngrok_url', url }));
+                            }
+                        });
+                    } else {
+                        console.log('[ngrok] Nenhum tunnel https encontrado');
+                    }
+                } catch(e) {
+                    console.log('[ngrok] Erro ao ler tunnels:', e.message);
+                }
+            });
+        }).on('error', (e) => {
+            console.log('[ngrok] Nao encontrado (ainda nao iniciado?):', e.message);
+        });
+    }, 5000); // aguarda 5s para o ngrok subir
 });
 
 function cleanup() {
     console.log('[Exit] Encerrando processos...');
     killProcess(rtlProcess);
     killProcess(rdsProcess);
+    killProcess(pilotProcess);
     killProcess(icecastProcess);
     spawn('bash', ['-c', 'pkill -9 rtl_fm; pkill -9 redsea; pkill -9 sox'], { detached: true });
     setTimeout(() => process.exit(0), 300);
