@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FM Radio</title>
+    <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        /* ── CONFIG: troque aqui se mudar o servidor ── */
+
+        :root {
+            --bg:      #07090c;
+            --panel:   #0e1117;
+            --border:  #1a2030;
+            --teal:    #00bcd4;
+            --green:   #00e676;
+            --red:     #ff1744;
+            --amber:   #ffea00;
+            --orange:  #ff8a65;
+            --dim:     #3a4555;
+            --text:    #c8d4e0;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Share Tech Mono', monospace;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        /* scanline subtle */
+        body::before {
+            content: '';
+            position: fixed; inset: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                transparent,
+                transparent 2px,
+                rgba(0,0,0,0.03) 2px,
+                rgba(0,0,0,0.03) 4px
+            );
+            pointer-events: none;
+            z-index: 9999;
+        }
+
+        .wrap {
+            width: 100%;
+            max-width: 400px;
+        }
+
+        /* ── HEADER ── */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .logo {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.8rem;
+            font-weight: 900;
+            letter-spacing: 0.3em;
+            color: var(--teal);
+            text-shadow: 0 0 20px rgba(0,188,212,0.5);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .users {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.65rem;
+            letter-spacing: 0.1em;
+            color: var(--dim);
+            font-family: 'Orbitron', sans-serif;
+            transition: color 0.3s;
+        }
+        .users.on { color: var(--teal); }
+        .users svg { width: 11px; height: 11px; }
+
+        .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #222;
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .dot.on {
+            background: var(--green);
+            box-shadow: 0 0 8px var(--green);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+        /* ── DISPLAY DE FREQUÊNCIA ── */
+        .freq-block {
+            text-align: center;
+            margin: 20px 0 16px;
+        }
+
+        .badges {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .badge {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.5rem;
+            letter-spacing: 0.2em;
+            padding: 3px 8px;
+            border-radius: 2px;
+            border: 1px solid #1e2530;
+            color: transparent;
+            background: #0d0f12;
+            transition: all 0.4s;
+            user-select: none;
+        }
+        .badge.on {
+            color: var(--bg);
+            background: var(--green);
+            border-color: var(--green);
+            box-shadow: 0 0 10px rgba(0,230,118,0.4);
+        }
+
+        .signal-bars {
+            display: flex;
+            align-items: flex-end;
+            gap: 2px;
+            height: 14px;
+        }
+        .bar { width: 5px; border-radius: 1px; background: var(--border); transition: background 0.3s; }
+        .bar:nth-child(1){height:3px} .bar:nth-child(2){height:5px}
+        .bar:nth-child(3){height:8px} .bar:nth-child(4){height:11px}
+        .bar:nth-child(5){height:14px}
+        .bar.good { background: var(--green); box-shadow: 0 0 4px rgba(0,230,118,0.4); }
+        .bar.warn { background: var(--amber); box-shadow: 0 0 4px rgba(255,234,0,0.4); }
+        .bar.bad  { background: var(--red);   box-shadow: 0 0 4px rgba(255,23,68,0.4); }
+
+        .freq-display {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 3rem;
+            font-weight: 900;
+            color: var(--teal);
+            letter-spacing: 0.04em;
+            text-shadow: 0 0 30px rgba(0,188,212,0.35);
+            line-height: 1;
+        }
+        .freq-mhz {
+            font-size: 0.95rem;
+            color: var(--dim);
+            margin-left: 4px;
+            font-weight: 400;
+        }
+
+        /* ── CONTROLES ── */
+        .controls {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .controls input {
+            flex: 1;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            color: var(--text);
+            font-family: 'Share Tech Mono', monospace;
+            font-size: 1rem;
+            padding: 10px 12px;
+            border-radius: 3px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .controls input:focus { border-color: var(--teal); }
+
+        .btn {
+            background: transparent;
+            border: 1px solid var(--teal);
+            color: var(--teal);
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.7rem;
+            letter-spacing: 0.1em;
+            padding: 10px 14px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+        .btn:hover { background: rgba(0,188,212,0.1); box-shadow: 0 0 12px rgba(0,188,212,0.15); }
+
+        .btn-arrow {
+            padding: 10px 12px;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .btn-arrow svg {
+            width: 13px; height: 13px;
+            fill: none; stroke: currentColor;
+            stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round;
+        }
+
+        /* ── BOTÃO OUVIR ── */
+        .btn-play {
+            width: 100%;
+            border-color: var(--green);
+            color: var(--green);
+            padding: 14px;
+            font-size: 0.8rem;
+            letter-spacing: 0.15em;
+            margin-bottom: 16px;
+            position: relative;
+            overflow: hidden;
+        }
+        .btn-play.playing {
+            background: rgba(0,230,118,0.05);
+            box-shadow: 0 0 20px rgba(0,230,118,0.1);
+        }
+        .btn-play::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, transparent, rgba(0,230,118,0.08), transparent);
+            transform: translateX(-100%);
+            transition: none;
+        }
+        .btn-play.playing::after {
+            animation: shimmer 2s ease-in-out infinite;
+        }
+        @keyframes shimmer { to { transform: translateX(100%); } }
+
+        /* ── VU METER ── */
+        .vu-wrap {
+            background: #090b0e;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 14px 14px 10px;
+            margin-bottom: 12px;
+        }
+        .vu-title {
+            font-size: 0.55rem;
+            letter-spacing: 0.25em;
+            color: var(--dim);
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        canvas { display: block; width: 100%; }
+        .vu-db {
+            text-align: center;
+            font-size: 0.7rem;
+            color: var(--dim);
+            margin-top: 6px;
+            letter-spacing: 0.1em;
+        }
+        .vu-db span { color: #7a8ea0; }
+
+        /* ── RDS ── */
+        .rds-wrap {
+            background: #090b0e;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 12px 14px;
+            margin-bottom: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+        }
+        .rds-row { display: flex; align-items: center; gap: 8px; }
+        .rds-tag { font-size: 0.6rem; color: var(--dim); letter-spacing: 0.1em; min-width: 26px; }
+        .rds-val { font-size: 0.75rem; color: var(--green); letter-spacing: 0.05em; }
+        .rds-rt  { font-size: 0.68rem; color: #7a8ea0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+
+        /* ── MEMÓRIAS ── */
+        .mem-wrap {
+            background: #090b0e;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 12px 14px;
+            margin-bottom: 12px;
+        }
+        .section-title {
+            font-size: 0.55rem;
+            letter-spacing: 0.25em;
+            color: var(--dim);
+            margin-bottom: 10px;
+        }
+        .mem-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+        }
+        .mem-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 8px 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+            position: relative;
+            overflow: hidden;
+        }
+        .mem-btn:hover { border-color: var(--teal); }
+        .mem-btn.active { border-color: var(--teal); background: rgba(0,188,212,0.04); }
+        .mem-btn.saving { border-color: var(--orange); }
+        .mem-num { font-size: 0.5rem; color: var(--dim); letter-spacing: 0.1em; font-family: 'Orbitron', sans-serif; }
+        .mem-freq {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.72rem;
+            color: var(--teal);
+            margin: 3px 0 2px;
+        }
+        .mem-freq.empty { color: #1e2a38; }
+        .mem-bar {
+            width: 100%; height: 2px;
+            background: transparent;
+            overflow: hidden;
+        }
+        .mem-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--orange);
+            border-radius: 1px;
+        }
+        .mem-hint { font-size: 0.52rem; color: var(--green); text-align: center; margin-top: 8px; letter-spacing: 0.04em; opacity: 0.7; }
+
+        /* ── FOOTER ── */
+        .footer {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.65rem;
+            color: var(--dim);
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+        .footer span { letter-spacing: 0.08em; }
+        .footer .val { color: #5a6a7a; }
+
+        /* ── MQTT STATUS ── */
+        .mqtt-status {
+            text-align: center;
+            font-size: 0.5rem;
+            letter-spacing: 0.15em;
+            color: #1e2a38;
+            margin-top: 8px;
+            transition: color 0.3s;
+        }
+        .mqtt-status.ok { color: #1a4030; }
+        .mqtt-status.err { color: #4a1020; }
+
+        /* ── OVERLAY DE SINTONIZAÇÃO ── */
+        .tuning-overlay {
+            display: none;
+            position: fixed; inset: 0;
+            background: rgba(7,9,12,0.92);
+            z-index: 9000;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 18px;
+            backdrop-filter: blur(4px);
+        }
+        .tuning-overlay.on { display: flex; }
+
+        .spinner {
+            width: 44px; height: 44px;
+            border: 3px solid var(--border);
+            border-top-color: var(--teal);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .tuning-freq-label {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 900;
+            color: var(--teal);
+            text-shadow: 0 0 30px rgba(0,188,212,0.5);
+            letter-spacing: 0.04em;
+        }
+        .tuning-label {
+            font-size: 0.72rem;
+            letter-spacing: 0.3em;
+            color: var(--teal);
+            opacity: 0.6;
+        }
+        .tuning-progress {
+            width: 200px; height: 2px;
+            background: var(--border);
+            border-radius: 1px;
+            overflow: hidden;
+        }
+        .tuning-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--teal);
+            border-radius: 1px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="wrap">
+    <div class="header">
+        <div class="logo">FM RADIO</div>
+        <div class="header-right">
+            <div class="users" id="usersEl">
+                <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <circle cx="7" cy="5" r="3"/>
+                    <path d="M2 13c0-3 2-5 5-5s5 2 5 5"/>
+                </svg>
+                <span id="usersNum">—</span>
+            </div>
+            <div class="dot" id="dot"></div>
+        </div>
+    </div>
+
+    <div class="freq-block">
+        <div class="badges">
+            <span class="badge" id="stereoBadge">STEREO</span>
+            <div class="signal-bars">
+                <div class="bar" id="b1"></div>
+                <div class="bar" id="b2"></div>
+                <div class="bar" id="b3"></div>
+                <div class="bar" id="b4"></div>
+                <div class="bar" id="b5"></div>
+            </div>
+        </div>
+        <div class="freq-display">
+            <span id="freqVal">---.--</span><span class="freq-mhz">MHz</span>
+        </div>
+    </div>
+
+    <div class="controls">
+        <input type="number" id="freqInput" step="0.025" min="76.1" max="108" placeholder="MHz">
+        <button class="btn btn-arrow" onclick="stepFreq(-0.1)">
+            <svg viewBox="0 0 14 14"><polyline points="2,10 7,4 12,10"/></svg>
+        </button>
+        <button class="btn btn-arrow" onclick="stepFreq(0.1)">
+            <svg viewBox="0 0 14 14"><polyline points="2,4 7,10 12,4"/></svg>
+        </button>
+        <button class="btn" onclick="tune()">TUNE</button>
+    </div>
+
+    <button class="btn btn-play" id="playBtn" onclick="toggleAudio()">&#9654; OUVIR</button>
+
+    <div class="vu-wrap">
+        <div class="vu-title">VU METER</div>
+        <canvas id="vu" height="110"></canvas>
+        <div class="vu-db">LEVEL <span id="dbVal">-∞ dB</span></div>
+    </div>
+
+    <div class="rds-wrap">
+        <div class="rds-row">
+            <span class="rds-tag">PS</span><span class="rds-val" id="rdsPs">---</span>
+            <span class="rds-tag" style="margin-left:auto">PI</span><span class="rds-val" id="rdsPi">---</span>
+        </div>
+        <div class="rds-row">
+            <span class="rds-tag">RT</span><span class="rds-val rds-rt" id="rdsRt">---</span>
+        </div>
+        <div class="rds-row">
+            <span class="rds-tag">PTY</span><span class="rds-val" id="rdsPty">---</span>
+            <span class="rds-tag" style="margin-left:auto">TP</span><span class="rds-val" id="rdsTp">---</span>
+        </div>
+    </div>
+
+    <div class="mem-wrap">
+        <div class="section-title">MEMÓRIAS</div>
+        <div class="mem-grid" id="memGrid">
+            <!-- gerado por JS -->
+        </div>
+        <div class="mem-hint">Toque para sintonizar &nbsp;·&nbsp; Segure 3s para salvar</div>
+    </div>
+
+    <div class="footer">
+        <span>SR <span class="val">44100 Hz</span></span>
+        <span>MODE <span class="val">WFM</span></span>
+        <span>ICECAST <span class="val" id="iceStatus">—</span></span>
+    </div>
+    <div class="mqtt-status" id="mqttStatus">MQTT: conectando...</div>
+</div>
+
+<!-- Overlay de sintonização -->
+<div class="tuning-overlay" id="tuningOverlay">
+    <div class="spinner"></div>
+    <div class="tuning-freq-label" id="tuningLabel">---</div>
+    <div class="tuning-label">SINTONIZANDO</div>
+    <div class="tuning-progress"><div class="tuning-fill" id="tuningFill"></div></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  CONFIGURAÇÃO — ajuste se mudar o servidor
+// ═══════════════════════════════════════════════════════
+const CFG = {
+    mqttUrl:   'wss://600e9b5cab1a404692f2659433ff4a66.s1.eu.hivemq.cloud:8884/mqtt',
+    mqttUser:  'admin',
+    mqttPass:  'Admin123',
+    topic:     'fm',
+    icecast:   'http://192.168.192.141:8000/jeri',
+    tuneDelay: 4000,  // ms de espera ao sintonizar
+};
+
+// Tópicos
+const T = {
+    status:       CFG.topic + '/status',
+    rds:          CFG.topic + '/rds',
+    rdsClear:     CFG.topic + '/rds/clear',
+    level:        CFG.topic + '/level',
+    stereo:       CFG.topic + '/stereo',
+    memories:     CFG.topic + '/memories',
+    streamStatus: CFG.topic + '/stream/status',
+    users:        CFG.topic + '/users',
+    cmdTune:      CFG.topic + '/cmd/tune',
+    cmdMemory:    CFG.topic + '/cmd/memory',
+    presence:     CFG.topic + '/presence/',
+};
+
+// ═══════════════════════════════════════════════════════
+//  ESTADO
+// ═══════════════════════════════════════════════════════
+let mc, audioEl = null, sharedMems = [null,null,null,null];
+let activeMem = -1, currentLevel = 0;
+const clientId = 'fm-web-' + Math.random().toString(16).slice(2,8);
+
+// ═══════════════════════════════════════════════════════
+//  VU METER
+// ═══════════════════════════════════════════════════════
+const canvas = document.getElementById('vu');
+const ctx    = canvas.getContext('2d');
+const MIN_DB = -40, MAX_DB = 3;
+const MIN_A  = -65 * Math.PI/180;
+const MAX_A  =  65 * Math.PI/180;
+
+function db2a(db) {
+    return MIN_A + Math.max(0,Math.min(1,(db-MIN_DB)/(MAX_DB-MIN_DB))) * (MAX_A-MIN_A);
+}
+
+let needle = MIN_A, target = MIN_A, peak = MIN_A, peakHold = 0;
+
+function drawVU() {
+    const dpr = window.devicePixelRatio||1;
+    canvas.width  = canvas.offsetWidth * dpr;
+    canvas.height = 110 * dpr;
+    ctx.scale(dpr,dpr);
+    const w = canvas.offsetWidth, h = 110;
+    ctx.clearRect(0,0,w,h);
+    const cx = w/2, cy = h*1.08, R = h*0.92;
+
+    // arcos de cor
+    [{a:MIN_DB,b:-6,c:'#00e676'},{a:-6,b:0,c:'#ffea00'},{a:0,b:MAX_DB,c:'#ff1744'}].forEach(z=>{
+        ctx.beginPath();
+        ctx.arc(cx,cy,R,db2a(z.a)-Math.PI/2,db2a(z.b)-Math.PI/2);
+        ctx.strokeStyle=z.c; ctx.lineWidth=5; ctx.globalAlpha=0.15; ctx.stroke(); ctx.globalAlpha=1;
+    });
+
+    // marcações
+    [-40,-30,-20,-10,-3,0,3].forEach(db=>{
+        const a=db2a(db)-Math.PI/2, major=db%10===0||db===3||db===-3;
+        const tl=major?9:5;
+        ctx.beginPath();
+        ctx.moveTo(cx+(R-1)*Math.cos(a),cy+(R-1)*Math.sin(a));
+        ctx.lineTo(cx+(R-1-tl)*Math.cos(a),cy+(R-1-tl)*Math.sin(a));
+        ctx.strokeStyle=db>=0?'#ff1744':db>=-6?'#ffea00':'#2a3a4a';
+        ctx.lineWidth=major?1.5:1; ctx.stroke();
+        if(major){
+            ctx.fillStyle=db>=0?'#ff1744':'#3a5060';
+            ctx.font=`9px Share Tech Mono,monospace`;
+            ctx.textAlign='center'; ctx.textBaseline='middle';
+            ctx.fillText(db>=0?'+'+db:db, cx+(R-20)*Math.cos(a), cy+(R-20)*Math.sin(a));
+        }
+    });
+
+    // peak
+    if(peak>MIN_A+0.05){
+        const pa=peak-Math.PI/2;
+        ctx.beginPath();
+        ctx.moveTo(cx+(R-7)*Math.cos(pa),cy+(R-7)*Math.sin(pa));
+        ctx.lineTo(cx+(R-1)*Math.cos(pa),cy+(R-1)*Math.sin(pa));
+        ctx.strokeStyle='#ff8a65'; ctx.lineWidth=2; ctx.stroke();
+    }
+
+    // agulha
+    const na=needle-Math.PI/2, nL=R-13;
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+nL*Math.cos(na+0.012),cy+nL*Math.sin(na+0.012));
+    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=3; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+nL*Math.cos(na),cy+nL*Math.sin(na));
+    ctx.strokeStyle=needle>db2a(0)?'#ff1744':needle>db2a(-6)?'#ffea00':'#dde8f0';
+    ctx.lineWidth=1.8; ctx.lineCap='round'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2);
+    ctx.fillStyle='#1e2a38'; ctx.fill();
+    ctx.strokeStyle='#3a4a5a'; ctx.lineWidth=1; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx,cy,1.8,0,Math.PI*2);
+    ctx.fillStyle='#6a8090'; ctx.fill();
+}
+
+function vuTick() {
+    const db = currentLevel>0.001 ? 20*Math.log10(currentLevel) : MIN_DB;
+    target = db2a(Math.max(MIN_DB,Math.min(MAX_DB,db)));
+    needle += (target-needle) * (target>needle ? 0.4 : 0.07);
+    if(needle>peak){peak=needle;peakHold=100;}
+    else{ peakHold--; if(peakHold<=0) peak+=(MIN_A-peak)*0.03; }
+    drawVU();
+    document.getElementById('dbVal').textContent =
+        currentLevel>0.001 ? db.toFixed(1)+' dB' : '-∞ dB';
+    requestAnimationFrame(vuTick);
+}
+new ResizeObserver(drawVU).observe(canvas);
+vuTick();
+
+// ═══════════════════════════════════════════════════════
+//  MQTT
+// ═══════════════════════════════════════════════════════
+function connectMqtt() {
+    const badge = document.getElementById('mqttStatus');
+    badge.textContent = 'MQTT: conectando...';
+    badge.className   = 'mqtt-status';
+
+    mc = mqtt.connect(CFG.mqttUrl, {
+        username:        CFG.mqttUser,
+        password:        CFG.mqttPass,
+        clientId:        clientId,
+        clean:           true,
+        reconnectPeriod: 3000,
+        connectTimeout:  10000,
+        will: {
+            topic:   T.presence + clientId,
+            payload: '0',
+            qos: 1, retain: false,
+        },
+    });
+
+    mc.on('connect', () => {
+        document.getElementById('dot').classList.add('on');
+        badge.textContent = 'MQTT: online';
+        badge.className   = 'mqtt-status ok';
+
+        const subs = [T.status, T.rds, T.rdsClear, T.level, T.stereo,
+                      T.memories, T.streamStatus, T.users];
+        mc.subscribe(subs, { qos:1 }, (err, granted) => {
+            if (!err) {
+                console.log('[MQTT] Subscrito:', granted.map(g=>g.topic).join(', '));
+                // heartbeat de presença
+                const hb = () => { if(mc.connected) mc.publish(T.presence+clientId,'1',{qos:0}); };
+                hb();
+                setInterval(hb, 30000);
+            }
+        });
+    });
+
+    mc.on('error', (e) => {
+        badge.textContent = 'MQTT: erro — ' + e.message;
+        badge.className   = 'mqtt-status err';
+    });
+
+    mc.on('close', () => {
+        document.getElementById('dot').classList.remove('on');
+        badge.textContent = 'MQTT: reconectando...';
+        badge.className   = 'mqtt-status';
+    });
+
+    mc.on('message', (topic, buf) => {
+        let msg;
+        try { msg = JSON.parse(buf.toString()); } catch(e) { msg = {}; }
+
+        if (topic === T.status) {
+            const f = (msg.freq/1000000).toFixed(3);
+            document.getElementById('freqVal').textContent  = f;
+            document.getElementById('freqInput').value      = f;
+        }
+        if (topic === T.level) {
+            currentLevel = msg.audio || 0;
+            updateBars(msg.quality || 0);
+        }
+        if (topic === T.stereo) {
+            document.getElementById('stereoBadge').classList.toggle('on', !!msg.stereo);
+        }
+        if (topic === T.rds) {
+            if (msg.ps)                     document.getElementById('rdsPs').textContent  = msg.ps;
+            if (msg.pi)                     document.getElementById('rdsPi').textContent  = msg.pi;
+            if (msg.radiotext)              document.getElementById('rdsRt').textContent  = msg.radiotext;
+            if (msg.prog_type)              document.getElementById('rdsPty').textContent = msg.prog_type;
+            if (msg.tp !== undefined)       document.getElementById('rdsTp').textContent  = msg.tp ? 'YES' : 'NO';
+        }
+        if (topic === T.rdsClear) {
+            ['rdsPs','rdsPi','rdsRt','rdsPty','rdsTp'].forEach(id => document.getElementById(id).textContent = '---');
+            document.getElementById('stereoBadge').classList.remove('on');
+        }
+        if (topic === T.memories) {
+            updateMemories(Array.isArray(msg) ? msg : [null,null,null,null]);
+        }
+        if (topic === T.streamStatus) {
+            document.getElementById('iceStatus').textContent =
+                msg.status === 'active' ? 'ON AIR' :
+                msg.status === 'connecting' ? 'CONN...' :
+                msg.status === 'error' ? 'ERRO' : 'OFF';
+        }
+        if (topic === T.users) {
+            const n = msg.count || 0;
+            document.getElementById('usersNum').textContent = n;
+            document.getElementById('usersEl').classList.toggle('on', n > 0);
+        }
+    });
+}
+
+function pub(topic, payload) {
+    if (mc && mc.connected) mc.publish(topic, JSON.stringify(payload), { qos:1 });
+}
+
+// ═══════════════════════════════════════════════════════
+//  SIGNAL BARS
+// ═══════════════════════════════════════════════════════
+function updateBars(q) {
+    for (let i=1;i<=5;i++) {
+        const b = document.getElementById('b'+i);
+        b.classList.remove('good','warn','bad');
+        if (i<=q) b.classList.add(q<=1?'bad':q<=3?'warn':'good');
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  SINTONIZAÇÃO
+// ═══════════════════════════════════════════════════════
+window.stepFreq = (d) => {
+    const cur = parseFloat(document.getElementById('freqInput').value) || 101.7;
+    const next = Math.max(76.1, Math.min(108, Math.round((cur+d)*1000)/1000));
+    document.getElementById('freqInput').value = next.toFixed(3);
+};
+
+window.tune = () => {
+    let f = parseFloat(document.getElementById('freqInput').value);
+    if (!f) return;
+    f = Math.max(76.1, Math.min(108, f));
+    pub(T.cmdTune, { freq: f });
+    showTuning(f);
+};
+
+let tuneTimer = null;
+function showTuning(freq) {
+    // Pausa áudio imediatamente
+    if (audioEl && !audioEl.paused) { audioEl.pause(); }
+    const btn = document.getElementById('playBtn');
+    btn.textContent = '▶ OUVIR';
+    btn.classList.remove('playing');
+
+    // Mostra overlay
+    const overlay = document.getElementById('tuningOverlay');
+    const fill    = document.getElementById('tuningFill');
+    document.getElementById('tuningLabel').textContent = parseFloat(freq).toFixed(2) + ' MHz';
+    fill.style.transition = 'none';
+    fill.style.width = '0%';
+    requestAnimationFrame(() => {
+        fill.style.transition = `width ${CFG.tuneDelay}ms linear`;
+        fill.style.width = '100%';
+    });
+    overlay.classList.add('on');
+
+    clearTimeout(tuneTimer);
+    tuneTimer = setTimeout(() => {
+        overlay.classList.remove('on');
+        // Reconecta no Icecast com elemento novo para descartar buffer
+        if (audioEl) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); audioEl = null; }
+        audioEl = new Audio(CFG.icecast);
+        audioEl.preload = 'auto';
+        const play = () => {
+            audioEl.play().then(() => {
+                btn.innerHTML = '⏸ PAUSAR';
+                btn.classList.add('playing');
+            }).catch(()=>{});
+        };
+        audioEl.readyState >= 3 ? play() : audioEl.addEventListener('canplay', play, { once:true });
+        setTimeout(() => { if(audioEl && audioEl.paused) play(); }, 3000);
+    }, CFG.tuneDelay);
+}
+
+// ═══════════════════════════════════════════════════════
+//  ÁUDIO
+// ═══════════════════════════════════════════════════════
+window.toggleAudio = () => {
+    const btn = document.getElementById('playBtn');
+    if (!audioEl || audioEl.paused) {
+        if (!audioEl) { audioEl = new Audio(CFG.icecast); audioEl.preload='auto'; }
+        const play = () => {
+            audioEl.play().then(() => {
+                btn.innerHTML = '⏸ PAUSAR';
+                btn.classList.add('playing');
+            }).catch(e => alert('Erro: ' + e.message));
+        };
+        audioEl.readyState >= 3 ? play() : audioEl.addEventListener('canplay', play, { once:true });
+    } else {
+        audioEl.pause();
+        btn.innerHTML = '▶ OUVIR';
+        btn.classList.remove('playing');
+    }
+};
+
+// ═══════════════════════════════════════════════════════
+//  MEMÓRIAS
+// ═══════════════════════════════════════════════════════
+function buildMemGrid() {
+    const grid = document.getElementById('memGrid');
+    grid.innerHTML = '';
+    for (let i=0;i<4;i++) {
+        const div = document.createElement('div');
+        div.className = 'mem-btn';
+        div.id = 'mem'+i;
+        div.innerHTML = `
+            <span class="mem-num">M${i+1}</span>
+            <span class="mem-freq empty" id="mf${i}">---</span>
+            <div class="mem-bar"><div class="mem-bar-fill" id="mb${i}"></div></div>
+        `;
+        grid.appendChild(div);
+
+        let holdTimer = null;
+        const HOLD = 3000;
+
+        div.addEventListener('mousedown', startHold);
+        div.addEventListener('touchstart', startHold, { passive:false });
+        div.addEventListener('mouseup', endHold);
+        div.addEventListener('mouseleave', cancelHold);
+        div.addEventListener('touchend', endHold);
+        div.addEventListener('touchcancel', cancelHold);
+
+        function startHold(e) {
+            e.preventDefault();
+            div.classList.add('saving');
+            const fill = document.getElementById('mb'+i);
+            fill.style.transition = 'none'; fill.style.width='0%';
+            requestAnimationFrame(()=>{
+                fill.style.transition = `width ${HOLD}ms linear`;
+                fill.style.width='100%';
+            });
+            holdTimer = setTimeout(() => {
+                const f = parseFloat(document.getElementById('freqInput').value) ||
+                          parseFloat(document.getElementById('freqVal').textContent);
+                if (f) {
+                    pub(T.cmdMemory, { index:i, freq:f });
+                    showToast(`M${i+1}: ${f.toFixed(2)} MHz`, '#00e676');
+                }
+                cancelHold();
+            }, HOLD);
+        }
+
+        function cancelHold() {
+            clearTimeout(holdTimer); holdTimer=null;
+            div.classList.remove('saving');
+            const fill=document.getElementById('mb'+i);
+            fill.style.transition='none'; fill.style.width='0%';
+        }
+
+        function endHold() {
+            if (holdTimer !== null) {
+                cancelHold();
+                if (sharedMems[i]) {
+                    activeMem = i;
+                    document.getElementById('freqInput').value = parseFloat(sharedMems[i]).toFixed(3);
+                    updateMemories(sharedMems);
+                    pub(T.cmdTune, { freq: sharedMems[i] });
+                    showTuning(sharedMems[i]);
+                }
+            }
+        }
+    }
+}
+
+function updateMemories(mems) {
+    sharedMems = mems;
+    mems.forEach((f,i) => {
+        const el = document.getElementById('mf'+i);
+        const btn= document.getElementById('mem'+i);
+        if (f) { el.textContent=parseFloat(f).toFixed(2); el.classList.remove('empty'); }
+        else   { el.textContent='---'; el.classList.add('empty'); }
+        btn.classList.toggle('active', i===activeMem);
+    });
+}
+
+// ═══════════════════════════════════════════════════════
+//  TOAST
+// ═══════════════════════════════════════════════════════
+function showToast(msg, color='#ff8a65') {
+    let t = document.getElementById('_toast');
+    if (!t) {
+        t = document.createElement('div'); t.id='_toast';
+        t.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);'+
+            'font-family:Orbitron,sans-serif;font-size:0.65rem;letter-spacing:0.15em;'+
+            'padding:10px 24px;border-radius:3px;z-index:9999;pointer-events:none;transition:opacity 0.4s;';
+        document.body.appendChild(t);
+    }
+    t.style.background='rgba(7,9,12,0.95)';
+    t.style.border='1px solid '+color;
+    t.style.color=color;
+    t.style.boxShadow='0 0 20px '+color+'33';
+    t.textContent=msg; t.style.opacity='1';
+    clearTimeout(t._t); t._t=setTimeout(()=>{ t.style.opacity='0'; },2500);
+}
+
+// ═══════════════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════════════
+buildMemGrid();
+connectMqtt();
+</script>
+</body>
+</html>
