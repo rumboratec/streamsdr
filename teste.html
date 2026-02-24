@@ -3,451 +3,169 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FM Radio</title>
-    <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+    <title>FM Monitor v5</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.3.4/mqtt.min.js"></script>
     <style>
-        /* ── CONFIG: troque aqui se mudar o servidor ── */
-
-        :root {
-            --bg:      #07090c;
-            --panel:   #0e1117;
-            --border:  #1a2030;
-            --teal:    #00bcd4;
-            --green:   #00e676;
-            --red:     #ff1744;
-            --amber:   #ffea00;
-            --orange:  #ff8a65;
-            --dim:     #3a4555;
-            --text:    #c8d4e0;
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-            background: var(--bg);
-            color: var(--text);
-            font-family: 'Share Tech Mono', monospace;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }
-
-        /* scanline subtle */
-        body::before {
-            content: '';
-            position: fixed; inset: 0;
-            background: repeating-linear-gradient(
-                0deg,
-                transparent,
-                transparent 2px,
-                rgba(0,0,0,0.03) 2px,
-                rgba(0,0,0,0.03) 4px
-            );
-            pointer-events: none;
-            z-index: 9999;
-        }
-
-        .wrap {
-            width: 100%;
-            max-width: 400px;
-        }
-
-        /* ── HEADER ── */
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 14px;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .logo {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 0.8rem;
-            font-weight: 900;
-            letter-spacing: 0.3em;
-            color: var(--teal);
-            text-shadow: 0 0 20px rgba(0,188,212,0.5);
-        }
-
-        .header-right {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .users {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            font-size: 0.65rem;
-            letter-spacing: 0.1em;
-            color: var(--dim);
-            font-family: 'Orbitron', sans-serif;
-            transition: color 0.3s;
-        }
-        .users.on { color: var(--teal); }
-        .users svg { width: 11px; height: 11px; }
-
-        .dot {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            background: #222;
-            transition: background 0.3s, box-shadow 0.3s;
-        }
-        .dot.on {
-            background: var(--green);
-            box-shadow: 0 0 8px var(--green);
-            animation: pulse 2s ease-in-out infinite;
-        }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-
-        /* ── DISPLAY DE FREQUÊNCIA ── */
-        .freq-block {
-            text-align: center;
-            margin: 20px 0 16px;
-        }
-
-        .badges {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            margin-bottom: 8px;
-        }
-
-        .badge {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 0.5rem;
-            letter-spacing: 0.2em;
-            padding: 3px 8px;
-            border-radius: 2px;
-            border: 1px solid #1e2530;
-            color: transparent;
-            background: #0d0f12;
-            transition: all 0.4s;
-            user-select: none;
-        }
-        .badge.on {
-            color: var(--bg);
-            background: var(--green);
-            border-color: var(--green);
-            box-shadow: 0 0 10px rgba(0,230,118,0.4);
-        }
-
-        .signal-bars {
-            display: flex;
-            align-items: flex-end;
-            gap: 2px;
-            height: 14px;
-        }
-        .bar { width: 5px; border-radius: 1px; background: var(--border); transition: background 0.3s; }
-        .bar:nth-child(1){height:3px} .bar:nth-child(2){height:5px}
-        .bar:nth-child(3){height:8px} .bar:nth-child(4){height:11px}
-        .bar:nth-child(5){height:14px}
-        .bar.good { background: var(--green); box-shadow: 0 0 4px rgba(0,230,118,0.4); }
-        .bar.warn { background: var(--amber); box-shadow: 0 0 4px rgba(255,234,0,0.4); }
-        .bar.bad  { background: var(--red);   box-shadow: 0 0 4px rgba(255,23,68,0.4); }
-
-        .freq-display {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 3rem;
-            font-weight: 900;
-            color: var(--teal);
-            letter-spacing: 0.04em;
-            text-shadow: 0 0 30px rgba(0,188,212,0.35);
-            line-height: 1;
-        }
-        .freq-mhz {
-            font-size: 0.95rem;
-            color: var(--dim);
-            margin-left: 4px;
-            font-weight: 400;
-        }
-
-        /* ── CONTROLES ── */
-        .controls {
-            display: flex;
-            gap: 6px;
-            margin-bottom: 12px;
-        }
-
-        .controls input {
-            flex: 1;
-            background: var(--panel);
-            border: 1px solid var(--border);
-            color: var(--text);
-            font-family: 'Share Tech Mono', monospace;
-            font-size: 1rem;
-            padding: 10px 12px;
-            border-radius: 3px;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        .controls input:focus { border-color: var(--teal); }
-
-        .btn {
-            background: transparent;
-            border: 1px solid var(--teal);
-            color: var(--teal);
-            font-family: 'Orbitron', sans-serif;
-            font-size: 0.7rem;
-            letter-spacing: 0.1em;
-            padding: 10px 14px;
-            border-radius: 3px;
-            cursor: pointer;
-            transition: all 0.15s;
-            white-space: nowrap;
-        }
-        .btn:hover { background: rgba(0,188,212,0.1); box-shadow: 0 0 12px rgba(0,188,212,0.15); }
-
-        .btn-arrow {
-            padding: 10px 12px;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .btn-arrow svg {
-            width: 13px; height: 13px;
-            fill: none; stroke: currentColor;
-            stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round;
-        }
-
-        /* ── BOTÃO OUVIR ── */
-        .btn-play {
-            width: 100%;
-            border-color: var(--green);
-            color: var(--green);
-            padding: 14px;
-            font-size: 0.8rem;
-            letter-spacing: 0.15em;
-            margin-bottom: 16px;
-            position: relative;
-            overflow: hidden;
-        }
-        .btn-play.playing {
-            background: rgba(0,230,118,0.05);
-            box-shadow: 0 0 20px rgba(0,230,118,0.1);
-        }
-        .btn-play::after {
-            content: '';
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(90deg, transparent, rgba(0,230,118,0.08), transparent);
-            transform: translateX(-100%);
-            transition: none;
-        }
-        .btn-play.playing::after {
-            animation: shimmer 2s ease-in-out infinite;
-        }
-        @keyframes shimmer { to { transform: translateX(100%); } }
-
-        /* ── VU METER ── */
-        .vu-wrap {
-            background: #090b0e;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 14px 14px 10px;
-            margin-bottom: 12px;
-        }
-        .vu-title {
-            font-size: 0.55rem;
-            letter-spacing: 0.25em;
-            color: var(--dim);
-            text-align: center;
-            margin-bottom: 10px;
-        }
-        canvas { display: block; width: 100%; }
-        .vu-db {
-            text-align: center;
-            font-size: 0.7rem;
-            color: var(--dim);
-            margin-top: 6px;
-            letter-spacing: 0.1em;
-        }
-        .vu-db span { color: #7a8ea0; }
-
-        /* ── RDS ── */
-        .rds-wrap {
-            background: #090b0e;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 12px 14px;
-            margin-bottom: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 7px;
-        }
-        .rds-row { display: flex; align-items: center; gap: 8px; }
-        .rds-tag { font-size: 0.6rem; color: var(--dim); letter-spacing: 0.1em; min-width: 26px; }
-        .rds-val { font-size: 0.75rem; color: var(--green); letter-spacing: 0.05em; }
-        .rds-rt  { font-size: 0.68rem; color: #7a8ea0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
-
-        /* ── MEMÓRIAS ── */
-        .mem-wrap {
-            background: #090b0e;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            padding: 12px 14px;
-            margin-bottom: 12px;
-        }
-        .section-title {
-            font-size: 0.55rem;
-            letter-spacing: 0.25em;
-            color: var(--dim);
-            margin-bottom: 10px;
-        }
-        .mem-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 6px;
-        }
-        .mem-btn {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 3px;
-            padding: 8px 4px;
-            cursor: pointer;
-            transition: all 0.15s;
-            position: relative;
-            overflow: hidden;
-        }
-        .mem-btn:hover { border-color: var(--teal); }
-        .mem-btn.active { border-color: var(--teal); background: rgba(0,188,212,0.04); }
-        .mem-btn.saving { border-color: var(--orange); }
-        .mem-num { font-size: 0.5rem; color: var(--dim); letter-spacing: 0.1em; font-family: 'Orbitron', sans-serif; }
-        .mem-freq {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 0.72rem;
-            color: var(--teal);
-            margin: 3px 0 2px;
-        }
-        .mem-freq.empty { color: #1e2a38; }
-        .mem-bar {
-            width: 100%; height: 2px;
-            background: transparent;
-            overflow: hidden;
-        }
-        .mem-bar-fill {
-            height: 100%;
-            width: 0%;
-            background: var(--orange);
-            border-radius: 1px;
-        }
-        .mem-hint { font-size: 0.52rem; color: var(--green); text-align: center; margin-top: 8px; letter-spacing: 0.04em; opacity: 0.7; }
-
-        /* ── FOOTER ── */
-        .footer {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.65rem;
-            color: var(--dim);
-            margin-top: 14px;
-            padding-top: 12px;
-            border-top: 1px solid var(--border);
-        }
-        .footer span { letter-spacing: 0.08em; }
-        .footer .val { color: #5a6a7a; }
-
-        /* ── MQTT STATUS ── */
-        .mqtt-status {
-            text-align: center;
-            font-size: 0.5rem;
-            letter-spacing: 0.15em;
-            color: #1e2a38;
-            margin-top: 8px;
-            transition: color 0.3s;
-        }
-        .mqtt-status.ok { color: #1a4030; }
-        .mqtt-status.err { color: #4a1020; }
-
-        /* ── OVERLAY DE SINTONIZAÇÃO ── */
-        .tuning-overlay {
-            display: none;
-            position: fixed; inset: 0;
-            background: rgba(7,9,12,0.92);
-            z-index: 9000;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 18px;
-            backdrop-filter: blur(4px);
-        }
-        .tuning-overlay.on { display: flex; }
-
-        .spinner {
-            width: 44px; height: 44px;
-            border: 3px solid var(--border);
-            border-top-color: var(--teal);
-            border-radius: 50%;
-            animation: spin 0.9s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        .tuning-freq-label {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 1.8rem;
-            font-weight: 900;
-            color: var(--teal);
-            text-shadow: 0 0 30px rgba(0,188,212,0.5);
-            letter-spacing: 0.04em;
-        }
-        .tuning-label {
-            font-size: 0.72rem;
-            letter-spacing: 0.3em;
-            color: var(--teal);
-            opacity: 0.6;
-        }
-        .tuning-progress {
-            width: 200px; height: 2px;
-            background: var(--border);
-            border-radius: 1px;
-            overflow: hidden;
-        }
-        .tuning-fill {
-            height: 100%;
-            width: 0%;
-            background: var(--teal);
-            border-radius: 1px;
-        }
+        @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700&display=swap');
+        :root { --bg:#0a0c0f; --panel:#111418; --border:#1e2530; --green:#00e676; --teal:#00bcd4; }
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { background:var(--bg); color:#cdd5e0; font-family:'Share Tech Mono',monospace;
+               display:flex; justify-content:center; align-items:center; min-height:100vh; padding:20px; }
+        .panel { background:var(--panel); border:1px solid var(--border); border-radius:4px;
+                 width:100%; max-width:420px; padding:24px; box-shadow:0 0 40px rgba(0,188,212,0.05); }
+        .header { display:flex; justify-content:space-between; align-items:center;
+                  margin-bottom:20px; border-bottom:1px solid var(--border); padding-bottom:14px; }
+        .title { font-family:'Orbitron',sans-serif; font-size:0.85rem; letter-spacing:0.2em; color:var(--teal); }
+        .status-dot { width:8px; height:8px; border-radius:50%; background:#444; transition:background 0.3s,box-shadow 0.3s; }
+        .status-dot.on { background:var(--green); box-shadow:0 0 8px var(--green); animation:blink 1.5s ease-in-out infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        .freq-row { display:flex; flex-direction:column; align-items:center; justify-content:center; margin:16px 0; gap:4px; }
+        .stereo-badge { font-size:0.55rem; letter-spacing:0.2em; color:transparent; background:#1a2530;
+                        border:1px solid #2a3545; padding:2px 8px; border-radius:3px;
+                        font-family:'Orbitron',sans-serif; transition:all 0.4s; user-select:none; }
+        .stereo-badge.on { color:#0a0c0f; background:var(--green); border-color:var(--green); box-shadow:0 0 8px rgba(0,230,118,0.4); }
+        .signal-bars { display:flex; align-items:flex-end; gap:2px; height:16px; }
+        .signal-bars .bar { width:5px; border-radius:1px; background:#1e2530; transition:background 0.3s; }
+        .signal-bars .bar:nth-child(1){height:4px} .signal-bars .bar:nth-child(2){height:6px}
+        .signal-bars .bar:nth-child(3){height:9px} .signal-bars .bar:nth-child(4){height:12px}
+        .signal-bars .bar:nth-child(5){height:16px}
+        .bar.lit-good{background:var(--green);box-shadow:0 0 4px rgba(0,230,118,0.5)}
+        .bar.lit-warn{background:#ffea00;box-shadow:0 0 4px rgba(255,234,0,0.4)}
+        .bar.lit-bad {background:#ff1744;box-shadow:0 0 4px rgba(255,23,68,0.4)}
+        .freq-display { font-family:'Orbitron',monospace; font-size:2.8rem; font-weight:700;
+                        color:var(--teal); text-align:center; letter-spacing:0.05em;
+                        text-shadow:0 0 20px rgba(0,188,212,0.4); }
+        .freq-unit { font-size:1rem; color:#4a5568; margin-left:4px; }
+        .controls { display:flex; gap:8px; margin-bottom:16px; }
+        .controls input { flex:1; background:var(--bg); border:1px solid var(--border); color:#cdd5e0;
+                          font-family:'Share Tech Mono',monospace; font-size:1rem; padding:10px 12px;
+                          border-radius:3px; outline:none; }
+        .controls input:focus { border-color:var(--teal); }
+        .btn { background:transparent; border:1px solid var(--teal); color:var(--teal);
+               font-family:'Orbitron',sans-serif; font-size:0.75rem; letter-spacing:0.1em;
+               padding:10px 16px; border-radius:3px; cursor:pointer; transition:all 0.15s; }
+        .btn:hover { background:rgba(0,188,212,0.1); }
+        .audio-row { display:flex; gap:8px; margin-bottom:20px; }
+        .btn-listen { flex:1; border-color:var(--green); color:var(--green); padding:12px; font-size:0.8rem; }
+        .btn-listen.active { background:rgba(0,230,118,0.05); box-shadow:0 0 15px rgba(0,230,118,0.08); }
+        .btn-listen.automuted { border-color:#ff8a65; color:#ff8a65; background:rgba(255,138,101,0.08); }
+        .tuning-overlay { display:none; position:fixed; inset:0; background:rgba(10,12,15,0.88);
+                          z-index:9998; flex-direction:column; align-items:center; justify-content:center; gap:16px; }
+        .tuning-overlay.visible { display:flex; }
+        .tuning-spinner { width:40px; height:40px; border:3px solid #1e2530; border-top-color:var(--teal);
+                          border-radius:50%; animation:spin 0.8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        .tuning-text { font-family:'Orbitron',sans-serif; font-size:0.8rem; letter-spacing:0.2em; color:var(--teal); }
+        .tuning-freq { font-family:'Orbitron',sans-serif; font-size:1.6rem; font-weight:700; color:var(--teal); text-shadow:0 0 20px rgba(0,188,212,0.5); }
+        .tuning-bar { width:180px; height:2px; background:#1e2530; border-radius:1px; overflow:hidden; }
+        .tuning-bar-fill { height:100%; background:var(--teal); border-radius:1px; animation:tuningProgress 4s linear forwards; }
+        @keyframes tuningProgress { from{width:0%} to{width:100%} }
+        .btn-arrow { border-color:var(--teal); color:var(--teal); padding:10px 14px; font-size:1rem;
+                     display:flex; align-items:center; justify-content:center; min-width:42px; }
+        .btn-arrow:hover { background:rgba(0,188,212,0.15); }
+        .btn-arrow svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+        .vu-wrap { background:#0d0f12; border:1px solid #1a2030; border-radius:6px; padding:16px 16px 10px; }
+        .vu-label { font-size:0.6rem; letter-spacing:0.2em; color:#3a4555; text-align:center; margin-bottom:12px; text-transform:uppercase; }
+        canvas#vuCanvas { display:block; width:100%; }
+        .vu-db { text-align:center; font-size:0.75rem; color:#4a5568; margin-top:8px; letter-spacing:0.1em; }
+        .vu-db span { color:#7a8ea0; }
+        .rds-wrap { background:#0d0f12; border:1px solid #1a2030; border-radius:6px;
+                    padding:12px 16px; margin-top:12px; display:flex; flex-direction:column; gap:8px; }
+        .rds-row { display:flex; align-items:center; gap:8px; font-size:0.75rem; }
+        .rds-tag { color:#3a5060; letter-spacing:0.1em; font-size:0.65rem; min-width:28px; }
+        .rds-val { color:#00e676; font-family:'Share Tech Mono',monospace; letter-spacing:0.05em; }
+        .rds-rt  { color:#7a8ea0; font-size:0.7rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:280px; }
+        .mem-wrap { background:#0d0f12; border:1px solid #1a2030; border-radius:6px; padding:12px 16px; margin-top:12px; }
+        .mem-label { font-size:0.6rem; letter-spacing:0.2em; color:#3a4555; text-transform:uppercase; margin-bottom:10px; }
+        .mem-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+        .mem-btn { display:flex; flex-direction:column; align-items:center; background:#0a0c0f;
+                   border:1px solid #1e2530; border-radius:4px; padding:8px 4px;
+                   cursor:pointer; transition:all 0.15s; position:relative; }
+        .mem-btn:hover { border-color:var(--teal); }
+        .mem-btn.active { border-color:var(--teal); background:rgba(0,188,212,0.05); }
+        .mem-btn.saving { border-color:#ff8a65; background:rgba(255,138,101,0.08); }
+        .mem-freq { font-family:'Orbitron',sans-serif; font-size:0.75rem; color:var(--teal); letter-spacing:0.02em; margin:4px 0; }
+        .mem-freq.empty { color:#2a3545; }
+        .mem-progress { width:100%; height:2px; background:transparent; border-radius:1px; margin-top:4px; overflow:hidden; }
+        .mem-progress-bar { height:100%; width:0%; background:#ff8a65; border-radius:1px; transition:width linear; }
+        .mem-hint { font-size:0.55rem; color:#3a4555; text-align:center; margin-top:8px; letter-spacing:0.05em; }
+        .icecast-wrap { background:#0d0f12; border:1px solid #1a2030; border-radius:6px;
+                        padding:12px 16px; margin-top:12px; display:flex; flex-direction:column; gap:8px; }
+        .icecast-label { font-size:0.6rem; letter-spacing:0.2em; color:#3a4555; text-transform:uppercase; }
+        .icecast-row { display:flex; gap:8px; }
+        .icecast-row input { flex:1; background:var(--bg); border:1px solid var(--border); color:#cdd5e0;
+                             font-family:'Share Tech Mono',monospace; font-size:0.8rem;
+                             padding:8px 10px; border-radius:3px; outline:none; }
+        .icecast-row input:focus { border-color:var(--teal); }
+        .btn-ice { border-color:#ff8a65; color:#ff8a65; font-size:0.7rem; padding:8px 12px; }
+        .btn-ice.active { background:rgba(255,138,101,0.1); box-shadow:0 0 10px rgba(255,138,101,0.15); }
+        .stream-lock { display:flex; align-items:center; gap:8px; }
+        .stream-lock input { flex:1; background:var(--bg); border:1px solid var(--border); color:#cdd5e0;
+                             font-family:'Share Tech Mono',monospace; font-size:0.8rem;
+                             padding:7px 10px; border-radius:3px; outline:none; }
+        .btn-unlock { border-color:var(--teal); color:var(--teal); font-size:0.65rem; padding:7px 10px; }
+        .stream-unlocked-indicator { font-size:0.55rem; letter-spacing:0.1em; color:#00e676; }
+        .stream-fields { display:none; flex-direction:column; gap:8px; }
+        .stream-fields.visible { display:flex; }
+        .stream-status { display:flex; align-items:center; gap:6px; font-size:0.6rem; letter-spacing:0.08em;
+                         color:#3a4555; font-family:'Share Tech Mono',monospace; margin-top:2px; min-height:16px; }
+        .stream-status-dot { width:6px; height:6px; border-radius:50%; background:#3a4555; flex-shrink:0; transition:background 0.3s,box-shadow 0.3s; }
+        .stream-status.connecting .stream-status-dot { background:#ffea00; box-shadow:0 0 6px rgba(255,234,0,0.6); animation:blink 0.8s ease-in-out infinite; }
+        .stream-status.connecting { color:#ffea00; }
+        .stream-status.active .stream-status-dot { background:#00e676; box-shadow:0 0 6px rgba(0,230,118,0.6); }
+        .stream-status.active { color:#00e676; }
+        .stream-status.error .stream-status-dot { background:#ff1744; }
+        .stream-status.error { color:#ff8a65; }
+        .users-count { display:flex; align-items:center; gap:4px; font-family:'Orbitron',sans-serif;
+                       font-size:0.65rem; color:#3a5060; letter-spacing:0.05em; cursor:pointer; }
+        .users-count.active { color:var(--teal); }
+        .users-panel { display:none; background:#0d0f12; border:1px solid #1a2030; border-radius:6px;
+                       padding:10px 14px; margin-top:12px; }
+        .users-panel.visible { display:block; }
+        .users-panel-label { font-size:0.55rem; letter-spacing:0.2em; color:#3a4555; text-transform:uppercase; margin-bottom:8px; }
+        .user-item { font-size:0.65rem; color:#7a8ea0; padding:3px 0; border-bottom:1px solid #1a2030; }
+        .user-item:last-child { border-bottom:none; }
+        .user-item .user-loc { color:var(--teal); }
+        .user-item .user-freq { color:var(--green); }
+        .info-row { display:flex; justify-content:space-between; font-size:0.7rem; color:#4a5568;
+                    margin-top:16px; border-top:1px solid var(--border); padding-top:12px; }
+        .info-val { color:#7a8ea0; }
+        .mqtt-badge { font-size:0.5rem; letter-spacing:0.15em; color:#2a3545; text-align:center; margin-top:6px; }
     </style>
 </head>
 <body>
 
-<div class="wrap">
+<div class="panel">
     <div class="header">
-        <div class="logo">FM RADIO</div>
-        <div class="header-right">
-            <div class="users" id="usersEl">
-                <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                    <circle cx="7" cy="5" r="3"/>
-                    <path d="M2 13c0-3 2-5 5-5s5 2 5 5"/>
+        <div class="title">FM MONITOR <span style="font-size:0.55rem;color:#2a4050">v5</span></div>
+        <div style="display:flex;align-items:center;gap:10px;">
+            <div class="users-count" id="usersCount" onclick="toggleUsersPanel()">
+                <svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <circle cx="7" cy="5" r="3"/><path d="M2 13c0-3 2-5 5-5s5 2 5 5"/>
                 </svg>
                 <span id="usersNum">—</span>
             </div>
-            <div class="dot" id="dot"></div>
+            <div class="status-dot" id="statusDot"></div>
         </div>
     </div>
 
-    <div class="freq-block">
-        <div class="badges">
-            <span class="badge" id="stereoBadge">STEREO</span>
+    <div class="users-panel" id="usersPanel">
+        <div class="users-panel-label">USUÁRIOS ONLINE</div>
+        <div id="usersList"><span style="font-size:0.65rem;color:#3a4555">Nenhum usuário</span></div>
+    </div>
+
+    <div class="freq-row">
+        <div style="display:flex;align-items:center;gap:10px;">
+            <span class="stereo-badge" id="stereoBadge">STEREO</span>
             <div class="signal-bars">
-                <div class="bar" id="b1"></div>
-                <div class="bar" id="b2"></div>
-                <div class="bar" id="b3"></div>
-                <div class="bar" id="b4"></div>
-                <div class="bar" id="b5"></div>
+                <div class="bar" id="bar1"></div>
+                <div class="bar" id="bar2"></div>
+                <div class="bar" id="bar3"></div>
+                <div class="bar" id="bar4"></div>
+                <div class="bar" id="bar5"></div>
             </div>
         </div>
-        <div class="freq-display">
-            <span id="freqVal">---.--</span><span class="freq-mhz">MHz</span>
-        </div>
+        <div class="freq-display"><span id="freqDisplay">---.---</span><span class="freq-unit">MHz</span></div>
     </div>
 
     <div class="controls">
@@ -461,12 +179,14 @@
         <button class="btn" onclick="tune()">TUNE</button>
     </div>
 
-    <button class="btn btn-play" id="playBtn" onclick="toggleAudio()">&#9654; OUVIR</button>
+    <div class="audio-row">
+        <button id="playBtn" class="btn btn-listen" onclick="openIcecast()">&#9654; PLAY</button>
+    </div>
 
     <div class="vu-wrap">
-        <div class="vu-title">VU METER</div>
-        <canvas id="vu" height="110"></canvas>
-        <div class="vu-db">LEVEL <span id="dbVal">-∞ dB</span></div>
+        <div class="vu-label">VU METER</div>
+        <canvas id="vuCanvas" height="130"></canvas>
+        <div class="vu-db">LEVEL <span id="dbVal">-&#8734; dB</span></div>
     </div>
 
     <div class="rds-wrap">
@@ -484,162 +204,428 @@
     </div>
 
     <div class="mem-wrap">
-        <div class="section-title">MEMÓRIAS</div>
-        <div class="mem-grid" id="memGrid">
-            <!-- gerado por JS -->
+        <div class="mem-label">MEMÓRIAS</div>
+        <div class="mem-grid">
+            <div class="mem-btn" id="mem0"><span class="mem-freq empty" id="memFreq0">---</span><div class="mem-progress" id="memProg0"></div></div>
+            <div class="mem-btn" id="mem1"><span class="mem-freq empty" id="memFreq1">---</span><div class="mem-progress" id="memProg1"></div></div>
+            <div class="mem-btn" id="mem2"><span class="mem-freq empty" id="memFreq2">---</span><div class="mem-progress" id="memProg2"></div></div>
+            <div class="mem-btn" id="mem3"><span class="mem-freq empty" id="memFreq3">---</span><div class="mem-progress" id="memProg3"></div></div>
         </div>
         <div class="mem-hint">Toque para sintonizar &nbsp;·&nbsp; Segure 3s para salvar</div>
     </div>
 
-    <div class="footer">
-        <span>SR <span class="val">44100 Hz</span></span>
-        <span>MODE <span class="val">WFM</span></span>
-        <span>ICECAST <span class="val" id="iceStatus">—</span></span>
+    <div class="icecast-wrap">
+        <div class="icecast-label">STREAM</div>
+        <div id="streamLockRow" class="stream-lock">
+            <input type="password" id="streamPasswordInput" placeholder="Senha para editar...">
+            <button class="btn btn-unlock" onclick="unlockStream()">UNLOCK</button>
+        </div>
+        <div class="stream-fields" id="streamFields">
+            <div class="stream-unlocked-indicator">&#128275; DESBLOQUEADO</div>
+            <div class="icecast-row">
+                <input type="text" id="icecastUrl" placeholder="icecast://source:pass@host:8000/stream">
+                <button class="btn btn-ice" id="icecastBtn" onclick="toggleIcecast()">STREAM</button>
+            </div>
+        </div>
+        <div class="stream-status" id="streamStatus">
+            <div class="stream-status-dot"></div>
+            <span id="streamStatusText">inativo</span>
+        </div>
     </div>
-    <div class="mqtt-status" id="mqttStatus">MQTT: conectando...</div>
+
+    <div class="info-row">
+        <span>SR <span class="info-val">44100 Hz</span></span>
+        <span>MODE <span class="info-val">WFM</span></span>
+        <span>GAIN <span class="info-val">19.2 dB</span></span>
+    </div>
+    <div class="mqtt-badge" id="mqttBadge">MQTT: conectando...</div>
 </div>
 
-<!-- Overlay de sintonização -->
 <div class="tuning-overlay" id="tuningOverlay">
-    <div class="spinner"></div>
-    <div class="tuning-freq-label" id="tuningLabel">---</div>
-    <div class="tuning-label">SINTONIZANDO</div>
-    <div class="tuning-progress"><div class="tuning-fill" id="tuningFill"></div></div>
+    <div class="tuning-spinner"></div>
+    <div class="tuning-freq" id="tuningFreqLabel">---</div>
+    <div class="tuning-text">SINTONIZANDO...</div>
+    <div class="tuning-bar"><div class="tuning-bar-fill" id="tuningBarFill"></div></div>
 </div>
 
 <script>
-// ═══════════════════════════════════════════════════════
-//  CONFIGURAÇÃO — ajuste se mudar o servidor
-// ═══════════════════════════════════════════════════════
-const CFG = {
-    mqttUrl:   'wss://600e9b5cab1a404692f2659433ff4a66.s1.eu.hivemq.cloud:8884/mqtt',
-    mqttUser:  'admin',
-    mqttPass:  'Admin123',
-    topic:     'fm',
-    icecast:   'http://192.168.192.141:8000/jeri',
-    tuneDelay: 4000,  // ms de espera ao sintonizar
-};
+// ══════════════════════════════════════════════
+//  CONFIGURAÇÃO — edite aqui antes de hospedar
+// ══════════════════════════════════════════════
+const MQTT_WS_URL = 'wss://600e9b5cab1a404692f2659433ff4a66.s1.eu.hivemq.cloud:8884/mqtt';
+const MQTT_USER   = 'admin';
+const MQTT_PASS   = 'Admin123';
+const TOPIC       = 'fm';
+const STREAM_PASS = 'radio123';
+const ICECAST_URL = 'http://150.230.85.71:8000/sdr';
+// ══════════════════════════════════════════════
 
-// Tópicos
 const T = {
-    status:       CFG.topic + '/status',
-    rds:          CFG.topic + '/rds',
-    rdsClear:     CFG.topic + '/rds/clear',
-    level:        CFG.topic + '/level',
-    stereo:       CFG.topic + '/stereo',
-    memories:     CFG.topic + '/memories',
-    streamStatus: CFG.topic + '/stream/status',
-    users:        CFG.topic + '/users',
-    cmdTune:      CFG.topic + '/cmd/tune',
-    cmdMemory:    CFG.topic + '/cmd/memory',
-    presence:     CFG.topic + '/presence/',
+    status:       TOPIC + '/status',
+    rds:          TOPIC + '/rds',
+    rdsClear:     TOPIC + '/rds/clear',
+    level:        TOPIC + '/level',
+    stereo:       TOPIC + '/stereo',
+    memories:     TOPIC + '/memories',
+    streamStatus: TOPIC + '/stream/status',
+    streamUrl:    TOPIC + '/stream/url',
+    users:        TOPIC + '/users',
+    userList:     TOPIC + '/users/list',
+    cmdTune:      TOPIC + '/cmd/tune',
+    cmdMemory:    TOPIC + '/cmd/memory',
+    cmdIcecast:   TOPIC + '/cmd/icecast',
+    cmdGetStream: TOPIC + '/cmd/get_stream',
+    presence:     TOPIC + '/presence/',
 };
 
-// ═══════════════════════════════════════════════════════
-//  ESTADO
-// ═══════════════════════════════════════════════════════
-let mc, audioEl = null, sharedMems = [null,null,null,null];
-let activeMem = -1, currentLevel = 0;
-const clientId = 'fm-web-' + Math.random().toString(16).slice(2,8);
+let mc, icecastActive = false;
+let currentLevel    = 0;
+let sharedMems      = [null, null, null, null];
+let activeMem       = -1;
+let autoMuted       = false;
+let isMuted         = false;
+let lowQualityCount = 0;
+let audioEl         = null;
+const AUTO_MUTE_THRESHOLD = 15;
+const clientId = 'fm-client-' + Math.random().toString(16).slice(2, 8);
 
-// ═══════════════════════════════════════════════════════
-//  VU METER
-// ═══════════════════════════════════════════════════════
-const canvas = document.getElementById('vu');
-const ctx    = canvas.getContext('2d');
-const MIN_DB = -40, MAX_DB = 3;
-const MIN_A  = -65 * Math.PI/180;
-const MAX_A  =  65 * Math.PI/180;
+const els = {
+    freq:      document.getElementById('freqDisplay'),
+    input:     document.getElementById('freqInput'),
+    statusDot: document.getElementById('statusDot'),
+    dbVal:     document.getElementById('dbVal'),
+    rdsPs:     document.getElementById('rdsPs'),
+    rdsPi:     document.getElementById('rdsPi'),
+    rdsRt:     document.getElementById('rdsRt'),
+    rdsPty:    document.getElementById('rdsPty'),
+    rdsTp:     document.getElementById('rdsTp'),
+};
 
-function db2a(db) {
-    return MIN_A + Math.max(0,Math.min(1,(db-MIN_DB)/(MAX_DB-MIN_DB))) * (MAX_A-MIN_A);
+// ── VU Meter ──────────────────────────────────
+const canvas  = document.getElementById('vuCanvas');
+const ctx     = canvas.getContext('2d');
+const MIN_DB  = -40, MAX_DB = 3;
+const MIN_ANG = -65 * Math.PI / 180;
+const MAX_ANG =  65 * Math.PI / 180;
+
+function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = canvas.offsetWidth * dpr;
+    canvas.height = 130 * dpr;
+    ctx.scale(dpr, dpr);
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+function dbToAngle(db) {
+    const t = Math.max(0, Math.min(1, (db - MIN_DB) / (MAX_DB - MIN_DB)));
+    return MIN_ANG + t * (MAX_ANG - MIN_ANG);
 }
 
-let needle = MIN_A, target = MIN_A, peak = MIN_A, peakHold = 0;
+let needleAngle = MIN_ANG, targetAngle = MIN_ANG;
+let peakAngle   = MIN_ANG, peakHold    = 0;
 
 function drawVU() {
-    const dpr = window.devicePixelRatio||1;
-    canvas.width  = canvas.offsetWidth * dpr;
-    canvas.height = 110 * dpr;
-    ctx.scale(dpr,dpr);
-    const w = canvas.offsetWidth, h = 110;
-    ctx.clearRect(0,0,w,h);
-    const cx = w/2, cy = h*1.08, R = h*0.92;
+    const w = canvas.offsetWidth, h = 130;
+    ctx.clearRect(0, 0, w, h);
+    const cx = w / 2, cy = h * 1.05, R = h * 0.92;
 
-    // arcos de cor
-    [{a:MIN_DB,b:-6,c:'#00e676'},{a:-6,b:0,c:'#ffea00'},{a:0,b:MAX_DB,c:'#ff1744'}].forEach(z=>{
+    [{from:MIN_DB,to:-6,color:'#00e676'},{from:-6,to:0,color:'#ffea00'},{from:0,to:MAX_DB,color:'#ff1744'}].forEach(z => {
         ctx.beginPath();
-        ctx.arc(cx,cy,R,db2a(z.a)-Math.PI/2,db2a(z.b)-Math.PI/2);
-        ctx.strokeStyle=z.c; ctx.lineWidth=5; ctx.globalAlpha=0.15; ctx.stroke(); ctx.globalAlpha=1;
+        ctx.arc(cx, cy, R, dbToAngle(z.from) - Math.PI/2, dbToAngle(z.to) - Math.PI/2);
+        ctx.strokeStyle = z.color; ctx.lineWidth = 6; ctx.globalAlpha = 0.18; ctx.stroke(); ctx.globalAlpha = 1;
     });
 
-    // marcações
-    [-40,-30,-20,-10,-3,0,3].forEach(db=>{
-        const a=db2a(db)-Math.PI/2, major=db%10===0||db===3||db===-3;
-        const tl=major?9:5;
+    [{db:-40,label:'-40',major:true},{db:-30,label:'-30',major:true},{db:-20,label:'-20',major:true},
+     {db:-10,label:'-10',major:true},{db:-7,label:'-7',major:false},{db:-5,label:'-5',major:false},
+     {db:-3,label:'-3',major:false},{db:0,label:'0',major:true},{db:3,label:'+3',major:true}].forEach(t => {
+        const angle = dbToAngle(t.db) - Math.PI/2, tl = t.major ? 10 : 6;
         ctx.beginPath();
-        ctx.moveTo(cx+(R-1)*Math.cos(a),cy+(R-1)*Math.sin(a));
-        ctx.lineTo(cx+(R-1-tl)*Math.cos(a),cy+(R-1-tl)*Math.sin(a));
-        ctx.strokeStyle=db>=0?'#ff1744':db>=-6?'#ffea00':'#2a3a4a';
-        ctx.lineWidth=major?1.5:1; ctx.stroke();
-        if(major){
-            ctx.fillStyle=db>=0?'#ff1744':'#3a5060';
-            ctx.font=`9px Share Tech Mono,monospace`;
-            ctx.textAlign='center'; ctx.textBaseline='middle';
-            ctx.fillText(db>=0?'+'+db:db, cx+(R-20)*Math.cos(a), cy+(R-20)*Math.sin(a));
+        ctx.moveTo(cx + (R-2)*Math.cos(angle), cy + (R-2)*Math.sin(angle));
+        ctx.lineTo(cx + (R-2-tl)*Math.cos(angle), cy + (R-2-tl)*Math.sin(angle));
+        ctx.strokeStyle = t.db >= 0 ? '#ff1744' : t.db >= -6 ? '#ffea00' : '#3a5060';
+        ctx.lineWidth = t.major ? 1.5 : 1; ctx.stroke();
+        if (t.major) {
+            ctx.fillStyle = t.db >= 0 ? '#ff1744' : '#3a5568';
+            ctx.font = '9px Share Tech Mono,monospace';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(t.label, cx + (R-20)*Math.cos(angle), cy + (R-20)*Math.sin(angle));
         }
     });
 
-    // peak
-    if(peak>MIN_A+0.05){
-        const pa=peak-Math.PI/2;
+    if (peakAngle > MIN_ANG + 0.05) {
+        const pa = peakAngle - Math.PI/2;
         ctx.beginPath();
-        ctx.moveTo(cx+(R-7)*Math.cos(pa),cy+(R-7)*Math.sin(pa));
-        ctx.lineTo(cx+(R-1)*Math.cos(pa),cy+(R-1)*Math.sin(pa));
-        ctx.strokeStyle='#ff8a65'; ctx.lineWidth=2; ctx.stroke();
+        ctx.moveTo(cx + (R-8)*Math.cos(pa), cy + (R-8)*Math.sin(pa));
+        ctx.lineTo(cx + (R-2)*Math.cos(pa), cy + (R-2)*Math.sin(pa));
+        ctx.strokeStyle = '#ff8a65'; ctx.lineWidth = 2; ctx.stroke();
     }
 
-    // agulha
-    const na=needle-Math.PI/2, nL=R-13;
-    ctx.beginPath(); ctx.moveTo(cx,cy);
-    ctx.lineTo(cx+nL*Math.cos(na+0.012),cy+nL*Math.sin(na+0.012));
-    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=3; ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(cx,cy);
-    ctx.lineTo(cx+nL*Math.cos(na),cy+nL*Math.sin(na));
-    ctx.strokeStyle=needle>db2a(0)?'#ff1744':needle>db2a(-6)?'#ffea00':'#dde8f0';
-    ctx.lineWidth=1.8; ctx.lineCap='round'; ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2);
-    ctx.fillStyle='#1e2a38'; ctx.fill();
-    ctx.strokeStyle='#3a4a5a'; ctx.lineWidth=1; ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx,cy,1.8,0,Math.PI*2);
-    ctx.fillStyle='#6a8090'; ctx.fill();
+    const na = needleAngle - Math.PI/2, nLen = R - 14;
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + nLen*Math.cos(na + 0.015), cy + nLen*Math.sin(na + 0.015));
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + nLen*Math.cos(na), cy + nLen*Math.sin(na));
+    ctx.strokeStyle = needleAngle > dbToAngle(0) ? '#ff1744' : needleAngle > dbToAngle(-6) ? '#ffea00' : '#e0e8f0';
+    ctx.lineWidth = 1.8; ctx.lineCap = 'round'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI*2); ctx.fillStyle = '#2a3545'; ctx.fill();
+    ctx.strokeStyle = '#4a5568'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI*2); ctx.fillStyle = '#7a8ea0'; ctx.fill();
 }
 
-function vuTick() {
-    const db = currentLevel>0.001 ? 20*Math.log10(currentLevel) : MIN_DB;
-    target = db2a(Math.max(MIN_DB,Math.min(MAX_DB,db)));
-    needle += (target-needle) * (target>needle ? 0.4 : 0.07);
-    if(needle>peak){peak=needle;peakHold=100;}
-    else{ peakHold--; if(peakHold<=0) peak+=(MIN_A-peak)*0.03; }
+function updateNeedle() {
+    const db = currentLevel > 0.001 ? 20 * Math.log10(currentLevel) : MIN_DB;
+    targetAngle  = dbToAngle(Math.max(MIN_DB, Math.min(MAX_DB, db)));
+    needleAngle += (targetAngle - needleAngle) * (targetAngle > needleAngle ? 0.35 : 0.06);
+    if (needleAngle > peakAngle) { peakAngle = needleAngle; peakHold = 120; }
+    else { peakHold--; if (peakHold <= 0) peakAngle += (MIN_ANG - peakAngle) * 0.03; }
     drawVU();
-    document.getElementById('dbVal').textContent =
-        currentLevel>0.001 ? db.toFixed(1)+' dB' : '-∞ dB';
-    requestAnimationFrame(vuTick);
+    els.dbVal.textContent = currentLevel > 0.001 ? db.toFixed(1) + ' dB' : '-\u221e dB';
+    requestAnimationFrame(updateNeedle);
 }
-new ResizeObserver(drawVU).observe(canvas);
-vuTick();
+updateNeedle();
 
-// ═══════════════════════════════════════════════════════
-//  MQTT
-// ═══════════════════════════════════════════════════════
+// ── Auto-mute ──────────────────────────────────
+function triggerAutoMute() {
+    autoMuted = true; lowQualityCount = 0;
+    if (audioEl && !audioEl.paused) {
+        audioEl.pause(); isMuted = true;
+        const btn = document.getElementById('playBtn');
+        btn.innerHTML = '&#9654; PLAY';
+        btn.classList.remove('active'); btn.classList.add('automuted');
+        showAlert('CHIADO DETECTADO — STREAM PAUSADO', '#ff8a65');
+    }
+}
+
+// ── Áudio ──────────────────────────────────────
+function freshAudio() {
+    if (audioEl) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); audioEl = null; }
+    audioEl = new Audio(ICECAST_URL);
+    audioEl.preload = 'auto';
+    return audioEl;
+}
+
+window.openIcecast = () => {
+    const btn = document.getElementById('playBtn');
+    autoMuted = false; lowQualityCount = 0;
+
+    if (!audioEl || audioEl.paused) {
+        // PLAY com buffer fresco
+        freshAudio(); isMuted = false;
+        const doPlay = () => {
+            audioEl.play().then(() => {
+                btn.innerHTML = '&#9646;&#9646; MUTE';
+                btn.classList.add('active'); btn.classList.remove('automuted');
+            }).catch(e => showAlert('ERRO: ' + e.message, '#ff8a65'));
+        };
+        audioEl.addEventListener('canplay', doPlay, { once: true });
+        setTimeout(() => { if (audioEl && audioEl.paused) doPlay(); }, 3000);
+    } else if (!isMuted) {
+        // Tocando → MUTE
+        audioEl.pause(); isMuted = true;
+        btn.innerHTML = '&#9654; PLAY';
+        btn.classList.remove('active', 'automuted');
+    } else {
+        // Mutado → PLAY com buffer fresco
+        freshAudio(); isMuted = false;
+        const doPlay = () => {
+            audioEl.play().then(() => {
+                btn.innerHTML = '&#9646;&#9646; MUTE';
+                btn.classList.add('active'); btn.classList.remove('automuted');
+            }).catch(e => showAlert('ERRO: ' + e.message, '#ff8a65'));
+        };
+        audioEl.addEventListener('canplay', doPlay, { once: true });
+        setTimeout(() => { if (audioEl && audioEl.paused) doPlay(); }, 3000);
+    }
+};
+
+// ── Tune / overlay ─────────────────────────────
+function tuneWait(freq) {
+    if (audioEl && !audioEl.paused) audioEl.pause();
+    const btn = document.getElementById('playBtn');
+    btn.innerHTML = '&#9654; PLAY';
+    btn.classList.remove('active', 'automuted');
+    isMuted = false;
+
+    const overlay = document.getElementById('tuningOverlay');
+    const label   = document.getElementById('tuningFreqLabel');
+    const bar     = document.getElementById('tuningBarFill');
+    label.textContent   = parseFloat(freq).toFixed(2) + ' MHz';
+    bar.style.animation = 'none';
+    bar.offsetHeight;
+    bar.style.animation = 'tuningProgress 4s linear forwards';
+    overlay.classList.add('visible');
+
+    clearTimeout(tuneWait._timer);
+    tuneWait._timer = setTimeout(() => {
+        overlay.classList.remove('visible');
+        freshAudio();
+        const doPlay = () => {
+            audioEl.play().then(() => {
+                btn.innerHTML = '&#9646;&#9646; MUTE';
+                btn.classList.add('active');
+            }).catch(() => {});
+        };
+        audioEl.addEventListener('canplay', doPlay, { once: true });
+        setTimeout(() => { if (audioEl && audioEl.paused) doPlay(); }, 3000);
+    }, 4000);
+}
+
+window.stepFreq = (delta) => {
+    const current = parseFloat(els.input.value) || parseFloat(els.freq.innerText) || 101.7;
+    let next = Math.round((current + delta) * 1000) / 1000;
+    if (next < 76.1) next = 76.1;
+    if (next > 108)  next = 108;
+    els.input.value = next.toFixed(3);
+};
+
+window.tune = () => {
+    let freq = parseFloat(els.input.value);
+    if (!freq) return;
+    freq = Math.max(76.1, Math.min(108, freq));
+    els.input.value = freq.toFixed(3);
+    pub(T.cmdTune, { freq, _clientId: clientId });
+    autoMuted = false; lowQualityCount = 0; isMuted = false;
+    tuneWait(freq);
+};
+
+// ── Stream ─────────────────────────────────────
+window.unlockStream = () => {
+    const pwd = document.getElementById('streamPasswordInput').value;
+    if (pwd === STREAM_PASS) {
+        document.getElementById('streamLockRow').style.display = 'none';
+        document.getElementById('streamFields').classList.add('visible');
+        pub(T.cmdGetStream, {});
+    } else {
+        showAlert('SENHA INCORRETA', '#ff1744');
+        document.getElementById('streamPasswordInput').value = '';
+    }
+};
+
+window.toggleIcecast = () => {
+    const url = document.getElementById('icecastUrl').value.trim();
+    if (!icecastActive && !url) return;
+    icecastActive = !icecastActive;
+    pub(T.cmdIcecast, { url: icecastActive ? url : null });
+};
+
+// ── Sinal ──────────────────────────────────────
+function updateSignalBars(quality) {
+    for (let i = 1; i <= 5; i++) {
+        const bar = document.getElementById('bar' + i);
+        bar.classList.remove('lit-good', 'lit-warn', 'lit-bad');
+        if (i <= quality) {
+            if (quality <= 1)      bar.classList.add('lit-bad');
+            else if (quality <= 3) bar.classList.add('lit-warn');
+            else                   bar.classList.add('lit-good');
+        }
+    }
+}
+
+// ── Usuários ───────────────────────────────────
+let usersPanelOpen = false;
+window.toggleUsersPanel = () => {
+    usersPanelOpen = !usersPanelOpen;
+    document.getElementById('usersPanel').classList.toggle('visible', usersPanelOpen);
+};
+
+function updateUsersList(list) {
+    const el = document.getElementById('usersList');
+    if (!list.length) { el.innerHTML = '<span style="font-size:0.65rem;color:#3a4555">Nenhum usuário</span>'; return; }
+    el.innerHTML = list.map(u => {
+        const loc  = [u.city, u.region, u.country].filter(Boolean).join(', ') || '?';
+        const freq = u.freq ? ' · <span class="user-freq">' + parseFloat(u.freq).toFixed(2) + ' MHz</span>' : '';
+        return '<div class="user-item"><span class="user-loc">' + loc + '</span>' + freq + '</div>';
+    }).join('');
+}
+
+// ── Memórias ───────────────────────────────────
+function updateMemories(mems) {
+    sharedMems = mems;
+    mems.forEach((freq, i) => {
+        const el  = document.getElementById('memFreq' + i);
+        const btn = document.getElementById('mem' + i);
+        if (freq) { el.textContent = parseFloat(freq).toFixed(2); el.classList.remove('empty'); }
+        else      { el.textContent = '---'; el.classList.add('empty'); }
+        btn.classList.toggle('active', i === activeMem);
+    });
+}
+
+const HOLD_TIME  = 3000;
+const holdTimers = [null, null, null, null];
+
+for (let i = 0; i < 4; i++) {
+    const btn  = document.getElementById('mem' + i);
+    const prog = document.getElementById('memProg' + i);
+
+    const startHold = (e) => {
+        e.preventDefault();
+        prog.innerHTML = '<div class="mem-progress-bar" id="memBar' + i + '"></div>';
+        const bar = document.getElementById('memBar' + i);
+        bar.style.transition = 'width ' + HOLD_TIME + 'ms linear';
+        btn.classList.add('saving');
+        setTimeout(() => { bar.style.width = '100%'; }, 10);
+        holdTimers[i] = setTimeout(() => {
+            const freq = parseFloat(els.input.value) || parseFloat(els.freq.innerText);
+            if (freq) {
+                pub(T.cmdMemory, { index: i, freq, _clientId: clientId });
+                showAlert('SALVO EM M' + (i+1) + ': ' + freq.toFixed(2) + ' MHz', '#00e676');
+            }
+            cancelHold(i);
+        }, HOLD_TIME);
+    };
+
+    const cancelHold = (idx) => {
+        clearTimeout(holdTimers[idx]); holdTimers[idx] = null;
+        document.getElementById('mem' + idx).classList.remove('saving');
+        document.getElementById('memProg' + idx).innerHTML = '';
+    };
+
+    const endHold = () => {
+        if (holdTimers[i] !== null) {
+            cancelHold(i);
+            if (sharedMems[i]) {
+                activeMem = i;
+                els.input.value = parseFloat(sharedMems[i]).toFixed(3);
+                updateMemories(sharedMems);
+                pub(T.cmdTune, { freq: sharedMems[i], _clientId: clientId });
+                tuneWait(sharedMems[i]);
+            }
+        }
+    };
+
+    btn.addEventListener('mousedown',   startHold);
+    btn.addEventListener('touchstart',  startHold, { passive: false });
+    btn.addEventListener('mouseup',     endHold);
+    btn.addEventListener('mouseleave',  () => { if (holdTimers[i] !== null) cancelHold(i); });
+    btn.addEventListener('touchend',    endHold);
+    btn.addEventListener('touchcancel', () => cancelHold(i));
+}
+
+// ── Alerta ─────────────────────────────────────
+function showAlert(message, color) {
+    color = color || '#ff8a65';
+    let al = document.getElementById('fmAlert');
+    if (!al) { al = document.createElement('div'); al.id = 'fmAlert'; document.body.appendChild(al); }
+    al.style.cssText = 'position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#1a0a00;border:1px solid ' + color + ';color:' + color + ';font-family:Orbitron,sans-serif;font-size:0.7rem;letter-spacing:0.15em;padding:10px 22px;border-radius:4px;box-shadow:0 0 18px rgba(255,138,101,0.25);z-index:9999;pointer-events:none;transition:opacity 0.4s;';
+    al.textContent = message; al.style.opacity = '1';
+    clearTimeout(al._t); al._t = setTimeout(() => { al.style.opacity = '0'; }, 2500);
+}
+
+// ── MQTT ───────────────────────────────────────
+function pub(topic, payload) {
+    if (!mc || !mc.connected) return;
+    mc.publish(topic, JSON.stringify(payload), { qos: 1 });
+}
+
 function connectMqtt() {
-    const badge = document.getElementById('mqttStatus');
+    const badge = document.getElementById('mqttBadge');
     badge.textContent = 'MQTT: conectando...';
-    badge.className   = 'mqtt-status';
 
-    mc = mqtt.connect(CFG.mqttUrl, {
-        username:        CFG.mqttUser,
-        password:        CFG.mqttPass,
+    mc = mqtt.connect(MQTT_WS_URL, {
+        username:        MQTT_USER,
+        password:        MQTT_PASS,
         clientId:        clientId,
         clean:           true,
         reconnectPeriod: 3000,
@@ -647,278 +633,96 @@ function connectMqtt() {
         will: {
             topic:   T.presence + clientId,
             payload: '0',
-            qos: 1, retain: false,
+            qos:     1,
+            retain:  false,
         },
     });
 
     mc.on('connect', () => {
-        document.getElementById('dot').classList.add('on');
+        els.statusDot.classList.add('on');
         badge.textContent = 'MQTT: online';
-        badge.className   = 'mqtt-status ok';
+        badge.style.color = '#00e676';
 
-        const subs = [T.status, T.rds, T.rdsClear, T.level, T.stereo,
-                      T.memories, T.streamStatus, T.users];
-        mc.subscribe(subs, { qos:1 }, (err, granted) => {
-            if (!err) {
-                console.log('[MQTT] Subscrito:', granted.map(g=>g.topic).join(', '));
-                // heartbeat de presença
-                const hb = () => { if(mc.connected) mc.publish(T.presence+clientId,'1',{qos:0}); };
-                hb();
-                setInterval(hb, 30000);
-            }
+        mc.subscribe([T.status, T.rds, T.rdsClear, T.level, T.stereo,
+                      T.memories, T.streamStatus, T.streamUrl,
+                      T.users, T.userList], { qos: 1 }, (err) => {
+            if (err) return;
+            pub(T.cmdGetStream, {});
+            // Heartbeat de presença
+            const presenceTopic = T.presence + clientId;
+            const heartbeat = () => { if (mc.connected) mc.publish(presenceTopic, JSON.stringify({ v: 1 }), { qos: 0 }); };
+            heartbeat();
+            setInterval(heartbeat, 30000);
         });
     });
 
-    mc.on('error', (e) => {
-        badge.textContent = 'MQTT: erro — ' + e.message;
-        badge.className   = 'mqtt-status err';
-    });
-
-    mc.on('close', () => {
-        document.getElementById('dot').classList.remove('on');
-        badge.textContent = 'MQTT: reconectando...';
-        badge.className   = 'mqtt-status';
-    });
+    mc.on('error',     () => { badge.textContent = 'MQTT: erro';          badge.style.color = '#ff1744'; });
+    mc.on('close',     () => { els.statusDot.classList.remove('on'); badge.textContent = 'MQTT: reconectando...'; badge.style.color = '#ffea00'; });
 
     mc.on('message', (topic, buf) => {
         let msg;
         try { msg = JSON.parse(buf.toString()); } catch(e) { msg = {}; }
 
         if (topic === T.status) {
-            const f = (msg.freq/1000000).toFixed(3);
-            document.getElementById('freqVal').textContent  = f;
-            document.getElementById('freqInput').value      = f;
+            els.freq.innerText = (msg.freq / 1000000).toFixed(3);
+            els.input.value    = (msg.freq / 1000000).toFixed(3);
         }
         if (topic === T.level) {
-            currentLevel = msg.audio || 0;
-            updateBars(msg.quality || 0);
+            currentLevel = msg.audio;
+            if (msg.quality !== undefined) {
+                updateSignalBars(msg.quality);
+                if (audioEl && !audioEl.paused && !autoMuted) {
+                    if (msg.quality <= 1) { lowQualityCount++; if (lowQualityCount >= AUTO_MUTE_THRESHOLD) triggerAutoMute(); }
+                    else lowQualityCount = 0;
+                }
+            }
         }
         if (topic === T.stereo) {
             document.getElementById('stereoBadge').classList.toggle('on', !!msg.stereo);
         }
         if (topic === T.rds) {
-            if (msg.ps)                     document.getElementById('rdsPs').textContent  = msg.ps;
-            if (msg.pi)                     document.getElementById('rdsPi').textContent  = msg.pi;
-            if (msg.radiotext)              document.getElementById('rdsRt').textContent  = msg.radiotext;
-            if (msg.prog_type)              document.getElementById('rdsPty').textContent = msg.prog_type;
-            if (msg.tp !== undefined)       document.getElementById('rdsTp').textContent  = msg.tp ? 'YES' : 'NO';
+            if (msg.ps)        els.rdsPs.textContent  = msg.ps;
+            if (msg.pi)        els.rdsPi.textContent  = msg.pi;
+            if (msg.radiotext) els.rdsRt.textContent  = msg.radiotext;
+            if (msg.prog_type) els.rdsPty.textContent = msg.prog_type;
+            if (msg.tp !== undefined) els.rdsTp.textContent = msg.tp ? 'YES' : 'NO';
         }
         if (topic === T.rdsClear) {
-            ['rdsPs','rdsPi','rdsRt','rdsPty','rdsTp'].forEach(id => document.getElementById(id).textContent = '---');
+            els.rdsPs.textContent = els.rdsPi.textContent = els.rdsRt.textContent =
+            els.rdsPty.textContent = els.rdsTp.textContent = '---';
             document.getElementById('stereoBadge').classList.remove('on');
         }
         if (topic === T.memories) {
-            updateMemories(Array.isArray(msg) ? msg : [null,null,null,null]);
+            updateMemories(Array.isArray(msg) ? msg : [null, null, null, null]);
         }
         if (topic === T.streamStatus) {
-            document.getElementById('iceStatus').textContent =
-                msg.status === 'active' ? 'ON AIR' :
-                msg.status === 'connecting' ? 'CONN...' :
-                msg.status === 'error' ? 'ERRO' : 'OFF';
-        }
-        if (topic === T.users) {
-            const n = msg.count || 0;
-            document.getElementById('usersNum').textContent = n;
-            document.getElementById('usersEl').classList.toggle('on', n > 0);
-        }
-    });
-}
-
-function pub(topic, payload) {
-    if (mc && mc.connected) mc.publish(topic, JSON.stringify(payload), { qos:1 });
-}
-
-// ═══════════════════════════════════════════════════════
-//  SIGNAL BARS
-// ═══════════════════════════════════════════════════════
-function updateBars(q) {
-    for (let i=1;i<=5;i++) {
-        const b = document.getElementById('b'+i);
-        b.classList.remove('good','warn','bad');
-        if (i<=q) b.classList.add(q<=1?'bad':q<=3?'warn':'good');
-    }
-}
-
-// ═══════════════════════════════════════════════════════
-//  SINTONIZAÇÃO
-// ═══════════════════════════════════════════════════════
-window.stepFreq = (d) => {
-    const cur = parseFloat(document.getElementById('freqInput').value) || 101.7;
-    const next = Math.max(76.1, Math.min(108, Math.round((cur+d)*1000)/1000));
-    document.getElementById('freqInput').value = next.toFixed(3);
-};
-
-window.tune = () => {
-    let f = parseFloat(document.getElementById('freqInput').value);
-    if (!f) return;
-    f = Math.max(76.1, Math.min(108, f));
-    pub(T.cmdTune, { freq: f });
-    showTuning(f);
-};
-
-let tuneTimer = null;
-function showTuning(freq) {
-    // Pausa áudio imediatamente
-    if (audioEl && !audioEl.paused) { audioEl.pause(); }
-    const btn = document.getElementById('playBtn');
-    btn.textContent = '▶ OUVIR';
-    btn.classList.remove('playing');
-
-    // Mostra overlay
-    const overlay = document.getElementById('tuningOverlay');
-    const fill    = document.getElementById('tuningFill');
-    document.getElementById('tuningLabel').textContent = parseFloat(freq).toFixed(2) + ' MHz';
-    fill.style.transition = 'none';
-    fill.style.width = '0%';
-    requestAnimationFrame(() => {
-        fill.style.transition = `width ${CFG.tuneDelay}ms linear`;
-        fill.style.width = '100%';
-    });
-    overlay.classList.add('on');
-
-    clearTimeout(tuneTimer);
-    tuneTimer = setTimeout(() => {
-        overlay.classList.remove('on');
-        // Reconecta no Icecast com elemento novo para descartar buffer
-        if (audioEl) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); audioEl = null; }
-        audioEl = new Audio(CFG.icecast);
-        audioEl.preload = 'auto';
-        const play = () => {
-            audioEl.play().then(() => {
-                btn.innerHTML = '⏸ PAUSAR';
-                btn.classList.add('playing');
-            }).catch(()=>{});
-        };
-        audioEl.readyState >= 3 ? play() : audioEl.addEventListener('canplay', play, { once:true });
-        setTimeout(() => { if(audioEl && audioEl.paused) play(); }, 3000);
-    }, CFG.tuneDelay);
-}
-
-// ═══════════════════════════════════════════════════════
-//  ÁUDIO
-// ═══════════════════════════════════════════════════════
-window.toggleAudio = () => {
-    const btn = document.getElementById('playBtn');
-    if (!audioEl || audioEl.paused) {
-        if (!audioEl) { audioEl = new Audio(CFG.icecast); audioEl.preload='auto'; }
-        const play = () => {
-            audioEl.play().then(() => {
-                btn.innerHTML = '⏸ PAUSAR';
-                btn.classList.add('playing');
-            }).catch(e => alert('Erro: ' + e.message));
-        };
-        audioEl.readyState >= 3 ? play() : audioEl.addEventListener('canplay', play, { once:true });
-    } else {
-        audioEl.pause();
-        btn.innerHTML = '▶ OUVIR';
-        btn.classList.remove('playing');
-    }
-};
-
-// ═══════════════════════════════════════════════════════
-//  MEMÓRIAS
-// ═══════════════════════════════════════════════════════
-function buildMemGrid() {
-    const grid = document.getElementById('memGrid');
-    grid.innerHTML = '';
-    for (let i=0;i<4;i++) {
-        const div = document.createElement('div');
-        div.className = 'mem-btn';
-        div.id = 'mem'+i;
-        div.innerHTML = `
-            <span class="mem-num">M${i+1}</span>
-            <span class="mem-freq empty" id="mf${i}">---</span>
-            <div class="mem-bar"><div class="mem-bar-fill" id="mb${i}"></div></div>
-        `;
-        grid.appendChild(div);
-
-        let holdTimer = null;
-        const HOLD = 3000;
-
-        div.addEventListener('mousedown', startHold);
-        div.addEventListener('touchstart', startHold, { passive:false });
-        div.addEventListener('mouseup', endHold);
-        div.addEventListener('mouseleave', cancelHold);
-        div.addEventListener('touchend', endHold);
-        div.addEventListener('touchcancel', cancelHold);
-
-        function startHold(e) {
-            e.preventDefault();
-            div.classList.add('saving');
-            const fill = document.getElementById('mb'+i);
-            fill.style.transition = 'none'; fill.style.width='0%';
-            requestAnimationFrame(()=>{
-                fill.style.transition = `width ${HOLD}ms linear`;
-                fill.style.width='100%';
-            });
-            holdTimer = setTimeout(() => {
-                const f = parseFloat(document.getElementById('freqInput').value) ||
-                          parseFloat(document.getElementById('freqVal').textContent);
-                if (f) {
-                    pub(T.cmdMemory, { index:i, freq:f });
-                    showToast(`M${i+1}: ${f.toFixed(2)} MHz`, '#00e676');
-                }
-                cancelHold();
-            }, HOLD);
-        }
-
-        function cancelHold() {
-            clearTimeout(holdTimer); holdTimer=null;
-            div.classList.remove('saving');
-            const fill=document.getElementById('mb'+i);
-            fill.style.transition='none'; fill.style.width='0%';
-        }
-
-        function endHold() {
-            if (holdTimer !== null) {
-                cancelHold();
-                if (sharedMems[i]) {
-                    activeMem = i;
-                    document.getElementById('freqInput').value = parseFloat(sharedMems[i]).toFixed(3);
-                    updateMemories(sharedMems);
-                    pub(T.cmdTune, { freq: sharedMems[i] });
-                    showTuning(sharedMems[i]);
-                }
+            const el  = document.getElementById('streamStatus');
+            const txt = document.getElementById('streamStatusText');
+            el.className = 'stream-status ' + (msg.status || '');
+            const labels = { off:'inativo', connecting:'conectando...', active: msg.msg || 'ativo', error: msg.msg || 'erro' };
+            txt.textContent = labels[msg.status] || msg.status;
+            const btn = document.getElementById('icecastBtn');
+            if (btn) {
+                btn.classList.toggle('active', msg.status === 'active' || msg.status === 'connecting');
+                if (msg.status === 'off' || msg.status === 'error') { btn.textContent = 'STREAM'; icecastActive = false; }
+                else if (msg.status === 'active') { btn.textContent = 'STOP'; icecastActive = true; }
             }
         }
-    }
-}
-
-function updateMemories(mems) {
-    sharedMems = mems;
-    mems.forEach((f,i) => {
-        const el = document.getElementById('mf'+i);
-        const btn= document.getElementById('mem'+i);
-        if (f) { el.textContent=parseFloat(f).toFixed(2); el.classList.remove('empty'); }
-        else   { el.textContent='---'; el.classList.add('empty'); }
-        btn.classList.toggle('active', i===activeMem);
+        if (topic === T.streamUrl) {
+            const input = document.getElementById('icecastUrl');
+            if (input && msg.url) input.value = msg.url;
+        }
+        if (topic === T.users) {
+            const n = msg.count;
+            document.getElementById('usersNum').textContent = n;
+            document.getElementById('usersCount').classList.toggle('active', n > 0);
+        }
+        if (topic === T.userList) {
+            updateUsersList(Array.isArray(msg) ? msg : []);
+        }
     });
 }
 
-// ═══════════════════════════════════════════════════════
-//  TOAST
-// ═══════════════════════════════════════════════════════
-function showToast(msg, color='#ff8a65') {
-    let t = document.getElementById('_toast');
-    if (!t) {
-        t = document.createElement('div'); t.id='_toast';
-        t.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);'+
-            'font-family:Orbitron,sans-serif;font-size:0.65rem;letter-spacing:0.15em;'+
-            'padding:10px 24px;border-radius:3px;z-index:9999;pointer-events:none;transition:opacity 0.4s;';
-        document.body.appendChild(t);
-    }
-    t.style.background='rgba(7,9,12,0.95)';
-    t.style.border='1px solid '+color;
-    t.style.color=color;
-    t.style.boxShadow='0 0 20px '+color+'33';
-    t.textContent=msg; t.style.opacity='1';
-    clearTimeout(t._t); t._t=setTimeout(()=>{ t.style.opacity='0'; },2500);
-}
-
-// ═══════════════════════════════════════════════════════
-//  INIT
-// ═══════════════════════════════════════════════════════
-buildMemGrid();
 connectMqtt();
 </script>
 </body>
